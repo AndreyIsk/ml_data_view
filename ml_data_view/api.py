@@ -30,7 +30,7 @@ class Api:
         """
         window = webview.windows[0]
         result = window.create_file_dialog(
-            webview.OPEN_DIALOG,
+            webview.FileDialog.OPEN,
             file_types=(
                 "Dataset files (*.parquet;*.arrow;*.csv)",
                 "All files (*.*)",
