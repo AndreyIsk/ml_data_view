@@ -42,25 +42,23 @@ training dataset without writing pandas code every time.
 
 
 
-\## Current phase: PHASE 0 ONLY
+\## Current phase: PHASE 1
 
 Build exactly this and stop:
 
-\- File picker to open a .parquet, .arrow, or .csv file
+\- Null/missing-value heatmap across columns
 
-\- Read it with polars/pyarrow
+\- Histograms for numeric columns
 
-\- Display: column names, dtypes, row count, file size, null count per column
+\- Bar charts showing class balance for categorical columns (top N categories, rest grouped as "Other")
 
-\- Display: first 50 rows as a scrollable table
+\- Length-distribution histogram for text/string columns
 
-\- No charts. No LLM. No packaging. No licensing.
+\- Charts render for the currently loaded dataset (Phase 0's file picker/schema/table view), read-only — no data editing
 
 
 
 \## Explicit non-goals right now
-
-\- Do not build the charting layer yet (that's Phase 1)
 
 \- Do not build the embedding projection feature yet (that's Phase 2)
 
