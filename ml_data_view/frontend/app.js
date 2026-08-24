@@ -10,6 +10,42 @@ const previewSection = document.getElementById("preview-section");
 const previewTableHead = document.querySelector("#preview-table thead");
 const previewTableBody = document.querySelector("#preview-table tbody");
 
+// Plotly's `responsive: true` relies on an internal ResizeObserver that, in
+// practice, does not reliably fire when a plot's container shrinks because
+// of a layout reflow (e.g. the pywebview window un-maximizing) rather than
+// a direct browser resize — the chart's SVG is left stale, oversized, and
+// overflowing its container, which reads as charts overlapping one
+// another. Tracking every plotted div and forcing an explicit resize on
+// window "resize" (debounced) fixes that regardless of which internal
+// mechanism failed to catch the shrink.
+const plottedDivs = new Set();
+let resizeDebounceTimer = null;
+
+function trackPlot(div) {
+  plottedDivs.add(div);
+}
+
+async function resizeTrackedPlots() {
+  // Plotly.Plots.resize() is async (returns a Promise) — awaiting each one
+  // in turn, rather than firing them all concurrently, avoids a race where
+  // overlapping redraws read each other's in-progress layout and end up
+  // with the wrong width (verified empirically: unawaited concurrent
+  // resizes left one chart's SVG matching neither its own container nor
+  // any other chart's width).
+  for (const div of plottedDivs) {
+    if (div.isConnected) {
+      await Plotly.Plots.resize(div);
+    } else {
+      plottedDivs.delete(div);
+    }
+  }
+}
+
+window.addEventListener("resize", () => {
+  clearTimeout(resizeDebounceTimer);
+  resizeDebounceTimer = setTimeout(resizeTrackedPlots, 150);
+});
+
 function formatBytes(bytes) {
   if (bytes < 1024) return `${bytes} B`;
   const units = ["KB", "MB", "GB", "TB"];
@@ -106,8 +142,10 @@ function renderNullHeatmap(data) {
   section.classList.remove("hidden");
 
   const yLabels = Array.from({ length: data.sampled_rows }, (_, i) => i);
+  const heatmapDiv = document.getElementById("null-heatmap-chart");
+  trackPlot(heatmapDiv);
   Plotly.newPlot(
-    document.getElementById("null-heatmap-chart"),
+    heatmapDiv,
     [
       {
         z: data.z,
@@ -163,6 +201,7 @@ function binCenters(binEdges) {
 }
 
 function plotNumericHistogram(div, chart) {
+  trackPlot(div);
   Plotly.newPlot(
     div,
     [{ x: binCenters(chart.bin_edges), y: chart.counts, type: "bar" }],
@@ -172,6 +211,7 @@ function plotNumericHistogram(div, chart) {
 }
 
 function plotCategoricalBar(div, chart) {
+  trackPlot(div);
   Plotly.newPlot(
     div,
     [{ x: chart.categories, y: chart.counts, type: "bar" }],
@@ -181,6 +221,7 @@ function plotCategoricalBar(div, chart) {
 }
 
 function plotTextLengthHistogram(div, chart) {
+  trackPlot(div);
   Plotly.newPlot(
     div,
     [{ x: binCenters(chart.bin_edges), y: chart.counts, type: "bar" }],
