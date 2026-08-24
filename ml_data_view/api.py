@@ -13,13 +13,21 @@ from __future__ import annotations
 
 from typing import Any
 
+import polars as pl
 import webview
 
-from ml_data_view.data_loader import UnsupportedFileTypeError, load_dataset
+from ml_data_view.data_loader import (
+    UnsupportedFileTypeError,
+    dataset_info_from_df,
+    read_dataframe,
+)
 
 
 class Api:
     """Methods exposed to the JS frontend via pywebview's js_api binding."""
+
+    def __init__(self) -> None:
+        self._current_df: pl.DataFrame | None = None
 
     def open_file_dialog(self) -> str | None:
         """Show a native file-open dialog restricted to supported types.
@@ -41,13 +49,16 @@ class Api:
         return result[0]
 
     def load_file(self, path: str) -> dict[str, Any]:
-        """Load a dataset file and return its profile as a JSON-safe dict.
+        """Load a dataset file, cache it, and return its profile as a dict.
 
         On failure, returns {"error": "<message>"} instead of raising, so
         the frontend always gets a plain dict back across the js_api bridge.
+        Caches the loaded DataFrame on success so get_chart_data() can reuse
+        it without re-reading the file from disk.
         """
         try:
-            dataset_info = load_dataset(path)
+            df = read_dataframe(path)
         except (UnsupportedFileTypeError, FileNotFoundError) as exc:
             return {"error": str(exc)}
-        return dataset_info.to_dict()
+        self._current_df = df
+        return dataset_info_from_df(df, path).to_dict()

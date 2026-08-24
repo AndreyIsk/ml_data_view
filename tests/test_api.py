@@ -34,3 +34,25 @@ def test_load_file_returns_error_dict_for_missing_file(tmp_path):
     result = api.load_file(str(missing_path))
 
     assert "error" in result
+
+
+def test_load_file_caches_dataframe_for_chart_data(tmp_path):
+    df = pl.DataFrame({"id": [1, 2, 3]})
+    csv_path = tmp_path / "sample.csv"
+    df.write_csv(csv_path)
+
+    api = Api()
+    api.load_file(str(csv_path))
+
+    assert api._current_df is not None
+    assert api._current_df.height == 3
+
+
+def test_load_file_does_not_cache_dataframe_on_error(tmp_path):
+    bad_path = tmp_path / "sample.txt"
+    bad_path.write_text("not a dataset")
+
+    api = Api()
+    api.load_file(str(bad_path))
+
+    assert api._current_df is None

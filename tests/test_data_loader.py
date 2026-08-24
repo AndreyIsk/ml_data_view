@@ -5,7 +5,9 @@ from ml_data_view.data_loader import (
     ColumnInfo,
     DatasetInfo,
     UnsupportedFileTypeError,
+    dataset_info_from_df,
     load_dataset,
+    read_dataframe,
 )
 
 
@@ -122,3 +124,24 @@ def test_preview_rows_returns_all_when_fewer_than_50(tmp_path):
 
     assert dataset_info.row_count == 3
     assert len(dataset_info.preview_rows) == 3
+
+
+def test_read_dataframe_returns_polars_dataframe(tmp_path):
+    csv_path = tmp_path / "sample.csv"
+    _sample_df().write_csv(csv_path)
+
+    df = read_dataframe(csv_path)
+
+    assert isinstance(df, pl.DataFrame)
+    assert df.height == 4
+
+
+def test_dataset_info_from_df_matches_load_dataset(tmp_path):
+    csv_path = tmp_path / "sample.csv"
+    _sample_df().write_csv(csv_path)
+
+    df = read_dataframe(csv_path)
+    via_helper = dataset_info_from_df(df, csv_path)
+    via_load_dataset = load_dataset(csv_path)
+
+    assert via_helper.to_dict() == via_load_dataset.to_dict()

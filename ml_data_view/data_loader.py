@@ -48,7 +48,7 @@ class DatasetInfo:
         }
 
 
-def _read_dataframe(path: Path, suffix: str) -> pl.DataFrame:
+def _dispatch_reader(path: Path, suffix: str) -> pl.DataFrame:
     if suffix == ".csv":
         return pl.read_csv(path)
     if suffix == ".parquet":
@@ -58,8 +58,8 @@ def _read_dataframe(path: Path, suffix: str) -> pl.DataFrame:
     raise UnsupportedFileTypeError(f"No reader wired up yet for '{suffix}'")
 
 
-def load_dataset(path: str | Path) -> DatasetInfo:
-    """Load a dataset file and extract its schema, size, and preview rows.
+def read_dataframe(path: str | Path) -> pl.DataFrame:
+    """Validate and read a dataset file into a polars DataFrame.
 
     Raises:
         UnsupportedFileTypeError: if the extension isn't .parquet/.arrow/.csv
@@ -74,15 +74,18 @@ def load_dataset(path: str | Path) -> DatasetInfo:
         )
     if not path.exists():
         raise FileNotFoundError(f"No such file: {path}")
+    return _dispatch_reader(path, suffix)
 
-    df = _read_dataframe(path, suffix)
+
+def dataset_info_from_df(df: pl.DataFrame, path: str | Path) -> DatasetInfo:
+    """Build a DatasetInfo from an already-loaded DataFrame and its source path."""
+    path = Path(path)
     null_counts = df.null_count().to_dicts()[0]
 
     columns = [
         ColumnInfo(name=name, dtype=str(dtype), null_count=null_counts[name])
         for name, dtype in df.schema.items()
     ]
-
     preview_rows = df.head(PREVIEW_ROW_LIMIT).to_dicts()
 
     return DatasetInfo(
@@ -92,3 +95,15 @@ def load_dataset(path: str | Path) -> DatasetInfo:
         columns=columns,
         preview_rows=preview_rows,
     )
+
+
+def load_dataset(path: str | Path) -> DatasetInfo:
+    """Load a dataset file and extract its schema, size, and preview rows.
+
+    Raises:
+        UnsupportedFileTypeError: if the extension isn't .parquet/.arrow/.csv
+        FileNotFoundError: if the file doesn't exist
+    """
+    path = Path(path)
+    df = read_dataframe(path)
+    return dataset_info_from_df(df, path)
