@@ -54,3 +54,31 @@ def _classify_string_column(df: pl.DataFrame, column: str) -> str:
     ):
         return "categorical"
     return "text"
+
+
+def _equal_width_histogram(values: list[float], bins: int) -> tuple[list[int], list[float]]:
+    """Bin `values` into `bins` equal-width buckets. Returns (counts, bin_edges)."""
+    lo, hi = min(values), max(values)
+    if lo == hi:
+        return [len(values)], [lo, lo + 1.0]
+
+    width = (hi - lo) / bins
+    edges = [lo + i * width for i in range(bins + 1)]
+    counts = [0] * bins
+    for value in values:
+        idx = int((value - lo) / width)
+        if idx >= bins:  # the max value lands exactly on the last edge
+            idx = bins - 1
+        counts[idx] += 1
+    return counts, edges
+
+
+def numeric_histogram_data(
+    df: pl.DataFrame, column: str, bins: int = NUMERIC_HISTOGRAM_BINS
+) -> dict[str, Any]:
+    values = [float(v) for v in df[column].drop_nulls().to_list()]
+    if not values:
+        return {"column": column, "bin_edges": [], "counts": []}
+
+    counts, bin_edges = _equal_width_histogram(values, bins)
+    return {"column": column, "bin_edges": bin_edges, "counts": counts}
