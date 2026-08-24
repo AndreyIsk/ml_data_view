@@ -98,3 +98,27 @@ def test_load_dataset_raises_on_missing_file(tmp_path):
 
     with pytest.raises(FileNotFoundError):
         load_dataset(missing_path)
+
+
+def test_preview_rows_capped_at_50_for_larger_files(tmp_path):
+    big_df = pl.DataFrame({"id": list(range(60)), "value": [x * 2 for x in range(60)]})
+    csv_path = tmp_path / "big.csv"
+    big_df.write_csv(csv_path)
+
+    dataset_info = load_dataset(csv_path)
+
+    assert dataset_info.row_count == 60
+    assert len(dataset_info.preview_rows) == 50
+    assert dataset_info.preview_rows[0]["id"] == 0
+    assert dataset_info.preview_rows[-1]["id"] == 49
+
+
+def test_preview_rows_returns_all_when_fewer_than_50(tmp_path):
+    small_df = pl.DataFrame({"id": [1, 2, 3]})
+    csv_path = tmp_path / "small.csv"
+    small_df.write_csv(csv_path)
+
+    dataset_info = load_dataset(csv_path)
+
+    assert dataset_info.row_count == 3
+    assert len(dataset_info.preview_rows) == 3
