@@ -51,6 +51,8 @@ class DatasetInfo:
 def _read_dataframe(path: Path, suffix: str) -> pl.DataFrame:
     if suffix == ".csv":
         return pl.read_csv(path)
+    if suffix == ".parquet":
+        return pl.read_parquet(path)
     raise UnsupportedFileTypeError(f"No reader wired up yet for '{suffix}'")
 
 

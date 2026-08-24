@@ -54,3 +54,15 @@ def test_load_csv_reads_schema_nulls_and_row_count(tmp_path):
     assert columns_by_name["label"].null_count == 1
     assert columns_by_name["score"].null_count == 1
     assert columns_by_name["id"].null_count == 0
+
+
+def test_load_parquet_reads_schema_nulls_and_row_count(tmp_path):
+    parquet_path = tmp_path / "sample.parquet"
+    _sample_df().write_parquet(parquet_path)
+
+    dataset_info = load_dataset(parquet_path)
+
+    assert dataset_info.row_count == 4
+    columns_by_name = {c.name: c for c in dataset_info.columns}
+    assert columns_by_name["label"].null_count == 1
+    assert columns_by_name["id"].dtype == "Int64"
