@@ -1,6 +1,7 @@
 import polars as pl
 
 from ml_data_view.chart_data import (
+    build_chart_payload,
     categorical_bar_data,
     classify_column,
     null_heatmap_data,
@@ -173,3 +174,36 @@ def test_null_heatmap_data_no_cap_needed_when_under_limit():
 
     assert result["sampled_rows"] == 3
     assert result["total_rows"] == 3
+
+
+def test_build_chart_payload_routes_columns_by_type():
+    df = pl.DataFrame(
+        {
+            "id": [1, 2, 3, 4],
+            "label": ["cat", "dog", "cat", "dog"],
+            "comment": [f"unique free text entry number {i} of many words" for i in range(4)],
+        }
+    )
+
+    payload = build_chart_payload(df)
+
+    assert payload["null_heatmap"]["columns"] == ["id", "label", "comment"]
+    assert [h["column"] for h in payload["numeric_histograms"]] == ["id"]
+    # "comment" has only 4 distinct values, which is <= CATEGORICAL_MAX_DISTINCT
+    # (50), so by the documented rule it's still classified as categorical at
+    # this tiny sample size — both "label" and "comment" land here.
+    assert [b["column"] for b in payload["categorical_bars"]] == ["label", "comment"]
+    assert payload["text_length_histograms"] == []
+
+
+def test_build_chart_payload_skips_unsupported_dtypes():
+    df = pl.DataFrame({"id": [1, 2, 3]})
+    df = df.with_columns(pl.date(2024, 1, 1).alias("created_at"))
+
+    payload = build_chart_payload(df)
+
+    numeric_columns = [h["column"] for h in payload["numeric_histograms"]]
+    categorical_columns = [b["column"] for b in payload["categorical_bars"]]
+    text_columns = [t["column"] for t in payload["text_length_histograms"]]
+    assert "created_at" not in numeric_columns + categorical_columns + text_columns
+    assert "created_at" in payload["null_heatmap"]["columns"]

@@ -129,3 +129,28 @@ def null_heatmap_data(df: pl.DataFrame, max_rows: int = NULL_HEATMAP_MAX_ROWS) -
         "total_rows": df.height,
         "z": z,
     }
+
+
+def build_chart_payload(df: pl.DataFrame) -> dict[str, Any]:
+    """Compute every Phase 1 chart's data for the given DataFrame."""
+    numeric_histograms = []
+    categorical_bars = []
+    text_length_histograms = []
+
+    for column in df.columns:
+        chart_type = classify_column(df, column)
+        if chart_type == "numeric":
+            numeric_histograms.append(numeric_histogram_data(df, column))
+        elif chart_type == "categorical":
+            categorical_bars.append(categorical_bar_data(df, column))
+        elif chart_type == "text":
+            text_length_histograms.append(text_length_histogram_data(df, column))
+        # "unsupported" columns (e.g. Date/Datetime) get no per-column chart
+        # yet, but are still included in the null heatmap below.
+
+    return {
+        "null_heatmap": null_heatmap_data(df),
+        "numeric_histograms": numeric_histograms,
+        "categorical_bars": categorical_bars,
+        "text_length_histograms": text_length_histograms,
+    }
