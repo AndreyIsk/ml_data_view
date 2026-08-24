@@ -46,3 +46,45 @@ class DatasetInfo:
             "columns": [column.to_dict() for column in self.columns],
             "preview_rows": self.preview_rows,
         }
+
+
+def _read_dataframe(path: Path, suffix: str) -> pl.DataFrame:
+    if suffix == ".csv":
+        return pl.read_csv(path)
+    raise UnsupportedFileTypeError(f"No reader wired up yet for '{suffix}'")
+
+
+def load_dataset(path: str | Path) -> DatasetInfo:
+    """Load a dataset file and extract its schema, size, and preview rows.
+
+    Raises:
+        UnsupportedFileTypeError: if the extension isn't .parquet/.arrow/.csv
+        FileNotFoundError: if the file doesn't exist
+    """
+    path = Path(path)
+    suffix = path.suffix.lower()
+    if suffix not in SUPPORTED_EXTENSIONS:
+        raise UnsupportedFileTypeError(
+            f"Unsupported file type '{suffix}'. Supported types: "
+            f"{', '.join(sorted(SUPPORTED_EXTENSIONS))}"
+        )
+    if not path.exists():
+        raise FileNotFoundError(f"No such file: {path}")
+
+    df = _read_dataframe(path, suffix)
+    null_counts = df.null_count().to_dicts()[0]
+
+    columns = [
+        ColumnInfo(name=name, dtype=str(dtype), null_count=null_counts[name])
+        for name, dtype in df.schema.items()
+    ]
+
+    preview_rows = df.head(PREVIEW_ROW_LIMIT).to_dicts()
+
+    return DatasetInfo(
+        file_path=str(path),
+        file_size_bytes=path.stat().st_size,
+        row_count=df.height,
+        columns=columns,
+        preview_rows=preview_rows,
+    )
