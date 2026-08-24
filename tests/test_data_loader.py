@@ -66,3 +66,14 @@ def test_load_parquet_reads_schema_nulls_and_row_count(tmp_path):
     columns_by_name = {c.name: c for c in dataset_info.columns}
     assert columns_by_name["label"].null_count == 1
     assert columns_by_name["id"].dtype == "Int64"
+
+
+def test_load_arrow_reads_schema_nulls_and_row_count(tmp_path):
+    arrow_path = tmp_path / "sample.arrow"
+    _sample_df().write_ipc(arrow_path)
+
+    dataset_info = load_dataset(arrow_path)
+
+    assert dataset_info.row_count == 4
+    columns_by_name = {c.name: c for c in dataset_info.columns}
+    assert columns_by_name["score"].null_count == 1

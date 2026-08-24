@@ -53,6 +53,8 @@ def _read_dataframe(path: Path, suffix: str) -> pl.DataFrame:
         return pl.read_csv(path)
     if suffix == ".parquet":
         return pl.read_parquet(path)
+    if suffix == ".arrow":
+        return pl.read_ipc(path)
     raise UnsupportedFileTypeError(f"No reader wired up yet for '{suffix}'")
 
 
