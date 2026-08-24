@@ -1,6 +1,12 @@
 import polars as pl
+import pytest
 
-from ml_data_view.data_loader import ColumnInfo, DatasetInfo, load_dataset
+from ml_data_view.data_loader import (
+    ColumnInfo,
+    DatasetInfo,
+    UnsupportedFileTypeError,
+    load_dataset,
+)
 
 
 def _sample_df() -> pl.DataFrame:
@@ -77,3 +83,18 @@ def test_load_arrow_reads_schema_nulls_and_row_count(tmp_path):
     assert dataset_info.row_count == 4
     columns_by_name = {c.name: c for c in dataset_info.columns}
     assert columns_by_name["score"].null_count == 1
+
+
+def test_load_dataset_raises_on_unsupported_extension(tmp_path):
+    bad_path = tmp_path / "sample.txt"
+    bad_path.write_text("not a dataset")
+
+    with pytest.raises(UnsupportedFileTypeError):
+        load_dataset(bad_path)
+
+
+def test_load_dataset_raises_on_missing_file(tmp_path):
+    missing_path = tmp_path / "does_not_exist.csv"
+
+    with pytest.raises(FileNotFoundError):
+        load_dataset(missing_path)
