@@ -64,3 +64,30 @@ th { background: #f5f5f5; position: sticky; top: 0; }
   overflow: auto;
   border: 1px solid #ddd;
 }
+
+h3 {
+  font-size: 1.05rem;
+  margin: 16px 0 8px;
+}
+
+.chart-note {
+  color: #555;
+  font-size: 0.85rem;
+  margin: 0 0 8px;
+}
+
+.chart-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 16px;
+}
+
+.chart-box {
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  padding: 4px;
+}
+
+#null-heatmap-chart {
+  width: 100%;
+}

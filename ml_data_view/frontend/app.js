@@ -28,6 +28,7 @@ function showError(message) {
   summarySection.classList.add("hidden");
   schemaSection.classList.add("hidden");
   previewSection.classList.add("hidden");
+  document.getElementById("charts-section").classList.add("hidden");
 }
 
 function clearError() {
@@ -85,6 +86,132 @@ async function handleOpenFile() {
     return;
   }
   renderDataset(data);
+
+  const chartData = await window.pywebview.api.get_chart_data();
+  if (chartData.error) {
+    showError(chartData.error);
+    return;
+  }
+  renderCharts(chartData);
 }
 
 openFileBtn.addEventListener("click", handleOpenFile);
+
+function renderNullHeatmap(data) {
+  const section = document.getElementById("null-heatmap-section");
+  if (!data.z.length) {
+    section.classList.add("hidden");
+    return;
+  }
+  section.classList.remove("hidden");
+
+  const yLabels = Array.from({ length: data.sampled_rows }, (_, i) => i);
+  Plotly.newPlot(
+    document.getElementById("null-heatmap-chart"),
+    [
+      {
+        z: data.z,
+        x: data.columns,
+        y: yLabels,
+        type: "heatmap",
+        colorscale: [
+          [0, "#f5f5f5"],
+          [1, "#c0392b"],
+        ],
+        showscale: false,
+        xgap: 1,
+        ygap: 1,
+      },
+    ],
+    {
+      margin: { t: 10, l: 50, r: 10, b: 80 },
+      height: 320,
+      yaxis: { title: "Row index", autorange: "reversed" },
+    },
+    { displayModeBar: false, responsive: true }
+  );
+
+  const note = document.getElementById("null-heatmap-note");
+  note.textContent =
+    data.total_rows > data.sampled_rows
+      ? `Showing first ${data.sampled_rows} of ${data.total_rows} rows (missing = red).`
+      : `All ${data.total_rows} rows shown (missing = red).`;
+}
+
+function renderColumnCharts(containerId, sectionId, charts, plotBuilder) {
+  const container = document.getElementById(containerId);
+  const section = document.getElementById(sectionId);
+  container.innerHTML = "";
+
+  const plottable = charts.filter((chart) => chart.counts && chart.counts.length);
+  if (!plottable.length) {
+    section.classList.add("hidden");
+    return;
+  }
+  section.classList.remove("hidden");
+
+  for (const chart of plottable) {
+    const chartDiv = document.createElement("div");
+    chartDiv.className = "chart-box";
+    container.appendChild(chartDiv);
+    plotBuilder(chartDiv, chart);
+  }
+}
+
+function binCenters(binEdges) {
+  return binEdges.slice(0, -1).map((edge, i) => (edge + binEdges[i + 1]) / 2);
+}
+
+function plotNumericHistogram(div, chart) {
+  Plotly.newPlot(
+    div,
+    [{ x: binCenters(chart.bin_edges), y: chart.counts, type: "bar" }],
+    { title: chart.column, margin: { t: 30, l: 40, r: 10, b: 40 }, height: 260 },
+    { displayModeBar: false, responsive: true }
+  );
+}
+
+function plotCategoricalBar(div, chart) {
+  Plotly.newPlot(
+    div,
+    [{ x: chart.categories, y: chart.counts, type: "bar" }],
+    { title: chart.column, margin: { t: 30, l: 40, r: 10, b: 60 }, height: 260 },
+    { displayModeBar: false, responsive: true }
+  );
+}
+
+function plotTextLengthHistogram(div, chart) {
+  Plotly.newPlot(
+    div,
+    [{ x: binCenters(chart.bin_edges), y: chart.counts, type: "bar" }],
+    {
+      title: `${chart.column} (length)`,
+      margin: { t: 30, l: 40, r: 10, b: 40 },
+      height: 260,
+    },
+    { displayModeBar: false, responsive: true }
+  );
+}
+
+function renderCharts(chartData) {
+  document.getElementById("charts-section").classList.remove("hidden");
+  renderNullHeatmap(chartData.null_heatmap);
+  renderColumnCharts(
+    "numeric-histograms",
+    "numeric-histograms-section",
+    chartData.numeric_histograms,
+    plotNumericHistogram
+  );
+  renderColumnCharts(
+    "categorical-bars",
+    "categorical-bars-section",
+    chartData.categorical_bars,
+    plotCategoricalBar
+  );
+  renderColumnCharts(
+    "text-length-histograms",
+    "text-length-histograms-section",
+    chartData.text_length_histograms,
+    plotTextLengthHistogram
+  );
+}
