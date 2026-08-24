@@ -97,3 +97,17 @@ def categorical_bar_data(
         counts = counts[:top_n] + [other_count]
 
     return {"column": column, "categories": categories, "counts": counts}
+
+
+def text_length_histogram_data(
+    df: pl.DataFrame, column: str, bins: int = TEXT_LENGTH_HISTOGRAM_BINS
+) -> dict[str, Any]:
+    lengths = [
+        float(length)
+        for length in df[column].drop_nulls().str.len_chars().to_list()
+    ]
+    if not lengths:
+        return {"column": column, "bin_edges": [], "counts": []}
+
+    counts, bin_edges = _equal_width_histogram(lengths, bins)
+    return {"column": column, "bin_edges": bin_edges, "counts": counts}

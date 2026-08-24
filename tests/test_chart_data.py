@@ -1,6 +1,11 @@
 import polars as pl
 
-from ml_data_view.chart_data import categorical_bar_data, classify_column, numeric_histogram_data
+from ml_data_view.chart_data import (
+    categorical_bar_data,
+    classify_column,
+    numeric_histogram_data,
+    text_length_histogram_data,
+)
 
 
 def test_classify_column_numeric_dtypes():
@@ -111,3 +116,29 @@ def test_categorical_bar_data_boolean_column():
 
     assert set(result["categories"]) == {"True", "False"}
     assert sum(result["counts"]) == 3
+
+
+def test_text_length_histogram_data_bins_by_character_length():
+    df = pl.DataFrame({"comment": ["a", "bb", "ccc", "dddd", "eeeee"]})
+
+    result = text_length_histogram_data(df, "comment", bins=5)
+
+    assert result["column"] == "comment"
+    assert len(result["counts"]) == 5
+    assert sum(result["counts"]) == 5
+
+
+def test_text_length_histogram_data_ignores_nulls():
+    df = pl.DataFrame({"comment": ["hello", None, "hi"]})
+
+    result = text_length_histogram_data(df, "comment", bins=3)
+
+    assert sum(result["counts"]) == 2
+
+
+def test_text_length_histogram_data_empty_column():
+    df = pl.DataFrame({"comment": pl.Series("comment", [], dtype=pl.String)})
+
+    result = text_length_histogram_data(df, "comment")
+
+    assert result == {"column": "comment", "bin_edges": [], "counts": []}
