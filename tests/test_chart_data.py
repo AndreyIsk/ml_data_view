@@ -192,7 +192,42 @@ def test_null_heatmap_data_caps_sampled_rows():
 
     assert result["total_rows"] == 700
     assert result["sampled_rows"] == 500
-    assert len(result["z"]) == 500
+
+
+def test_null_heatmap_data_bins_display_rows_below_plotly_rasterizer_limit():
+    # Plotly's heatmap trace silently renders a 100%-transparent image once
+    # the z-matrix has more rows than the plot has pixels of height (empirically
+    # confirmed: works at 150 rows / 230px height, produces zero opaque pixels
+    # at 230+ rows / 230px height). Capping display rows well below any
+    # realistic chart pixel height avoids ever hitting that cliff.
+    df = pl.DataFrame({"a": list(range(700))})
+
+    result = null_heatmap_data(df, max_rows=500, max_display_rows=100)
+
+    assert result["sampled_rows"] == 500
+    assert result["display_rows"] == 100
+    assert len(result["z"]) == 100
+
+
+def test_null_heatmap_data_bin_values_are_fraction_missing_not_binary():
+    # 10 source rows binned into 2 display rows (5 source rows per bin);
+    # column "a" has 1 missing out of 5 in the first bin -> 0.2, none in the
+    # second bin -> 0.0.
+    df = pl.DataFrame({"a": [None, 1, 2, 3, 4, 5, 6, 7, 8, 9]})
+
+    result = null_heatmap_data(df, max_display_rows=2)
+
+    assert result["display_rows"] == 2
+    assert result["z"] == [[0.2], [0.0]]
+
+
+def test_null_heatmap_data_no_binning_when_rows_fit_within_display_cap():
+    df = pl.DataFrame({"a": [1, None, 3]})
+
+    result = null_heatmap_data(df, max_display_rows=100)
+
+    assert result["display_rows"] == 3
+    assert result["z"] == [[0], [1], [0]]
 
 
 def test_null_heatmap_data_no_cap_needed_when_under_limit():

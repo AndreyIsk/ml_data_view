@@ -16,6 +16,7 @@ NUMERIC_HISTOGRAM_BINS = 30
 TEXT_LENGTH_HISTOGRAM_BINS = 30
 TOP_N_CATEGORIES = 10
 NULL_HEATMAP_MAX_ROWS = 500
+NULL_HEATMAP_MAX_DISPLAY_ROWS = 100
 CATEGORICAL_MAX_DISTINCT = 50
 CATEGORICAL_MAX_DISTINCT_RATIO = 0.5
 
@@ -128,19 +129,61 @@ def text_length_histogram_data(
     return {"column": column, "bin_edges": bin_edges, "counts": counts}
 
 
-def null_heatmap_data(df: pl.DataFrame, max_rows: int = NULL_HEATMAP_MAX_ROWS) -> dict[str, Any]:
+def null_heatmap_data(
+    df: pl.DataFrame,
+    max_rows: int = NULL_HEATMAP_MAX_ROWS,
+    max_display_rows: int = NULL_HEATMAP_MAX_DISPLAY_ROWS,
+) -> dict[str, Any]:
+    """Build the null/missing heatmap's row x column grid.
+
+    Plotly's heatmap trace silently rasterizes to a 100%-transparent image
+    once the z-matrix has more rows than the plot has pixels of height
+    (confirmed empirically: renders fine at 150 rows in a ~230px-tall plot,
+    produces zero opaque pixels at 230+ rows in that same plot). To stay
+    well clear of that cliff regardless of window size, sampled rows are
+    grouped into at most `max_display_rows` bins, and each cell becomes the
+    *fraction* of missing values in that bin for that column (0.0-1.0)
+    rather than a strict 0/1 — which also reads as a more informative
+    "density of missingness" view for large datasets. For datasets small
+    enough that no binning is needed, each bin is exactly one row, so the
+    fraction is always 0.0 or 1.0 and the output is unchanged from a plain
+    per-row grid.
+    """
     sample_df = df.head(max_rows) if df.height > max_rows else df
     columns = sample_df.columns
     column_values = {column: sample_df[column].to_list() for column in columns}
+    sampled_rows = sample_df.height
 
-    z = [
-        [1 if _is_missing(column_values[column][row_idx]) else 0 for column in columns]
-        for row_idx in range(sample_df.height)
-    ]
+    if sampled_rows == 0:
+        return {
+            "columns": columns,
+            "sampled_rows": 0,
+            "display_rows": 0,
+            "total_rows": df.height,
+            "z": [],
+        }
+
+    display_rows = min(sampled_rows, max_display_rows)
+    bin_size = sampled_rows / display_rows
+
+    z = []
+    for bin_idx in range(display_rows):
+        start = int(bin_idx * bin_size)
+        is_last_bin = bin_idx == display_rows - 1
+        end = sampled_rows if is_last_bin else max(int((bin_idx + 1) * bin_size), start + 1)
+        bin_length = end - start
+        z.append(
+            [
+                sum(1 for row_idx in range(start, end) if _is_missing(column_values[column][row_idx]))
+                / bin_length
+                for column in columns
+            ]
+        )
 
     return {
         "columns": columns,
-        "sampled_rows": sample_df.height,
+        "sampled_rows": sampled_rows,
+        "display_rows": display_rows,
         "total_rows": df.height,
         "z": z,
     }

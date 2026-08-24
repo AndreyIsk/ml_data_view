@@ -128,12 +128,12 @@ async function handleOpenFile() {
     showError(chartData.error);
     return;
   }
-  renderCharts(chartData);
+  await renderCharts(chartData);
 }
 
 openFileBtn.addEventListener("click", handleOpenFile);
 
-function renderNullHeatmap(data) {
+async function renderNullHeatmap(data) {
   const section = document.getElementById("null-heatmap-section");
   if (!data.z.length) {
     section.classList.add("hidden");
@@ -141,10 +141,16 @@ function renderNullHeatmap(data) {
   }
   section.classList.remove("hidden");
 
-  const yLabels = Array.from({ length: data.sampled_rows }, (_, i) => i);
+  // z rows are bins (each bin's cell is the *fraction* missing, 0.0-1.0),
+  // not necessarily individual source rows — see null_heatmap_data()'s
+  // docstring for why (Plotly can't rasterize more z-rows than the plot
+  // has pixels of height). display_rows == sampled_rows when no binning
+  // was needed, in which case fractions are always exactly 0 or 1.
+  const isBinned = data.display_rows < data.sampled_rows;
+  const yLabels = Array.from({ length: data.display_rows }, (_, i) => i);
   const heatmapDiv = document.getElementById("null-heatmap-chart");
   trackPlot(heatmapDiv);
-  Plotly.newPlot(
+  await Plotly.newPlot(
     heatmapDiv,
     [
       {
@@ -152,6 +158,8 @@ function renderNullHeatmap(data) {
         x: data.columns,
         y: yLabels,
         type: "heatmap",
+        zmin: 0,
+        zmax: 1,
         colorscale: [
           [0, "#f5f5f5"],
           [1, "#c0392b"],
@@ -164,19 +172,23 @@ function renderNullHeatmap(data) {
     {
       margin: { t: 10, l: 50, r: 10, b: 80 },
       height: 320,
-      yaxis: { title: "Row index", autorange: "reversed" },
+      yaxis: { title: isBinned ? "Row bin" : "Row index", autorange: "reversed" },
     },
     { displayModeBar: false, responsive: true }
   );
 
   const note = document.getElementById("null-heatmap-note");
-  note.textContent =
-    data.total_rows > data.sampled_rows
-      ? `Showing first ${data.sampled_rows} of ${data.total_rows} rows (missing = red).`
-      : `All ${data.total_rows} rows shown (missing = red).`;
+  if (isBinned) {
+    note.textContent = `Rows 0-${data.sampled_rows} of ${data.total_rows} grouped into ${data.display_rows} bins (color intensity = % missing per bin).`;
+  } else {
+    note.textContent =
+      data.total_rows > data.sampled_rows
+        ? `Showing first ${data.sampled_rows} of ${data.total_rows} rows (missing = red).`
+        : `All ${data.total_rows} rows shown (missing = red).`;
+  }
 }
 
-function renderColumnCharts(containerId, sectionId, charts, plotBuilder) {
+async function renderColumnCharts(containerId, sectionId, charts, plotBuilder) {
   const container = document.getElementById(containerId);
   const section = document.getElementById(sectionId);
   container.innerHTML = "";
@@ -188,11 +200,15 @@ function renderColumnCharts(containerId, sectionId, charts, plotBuilder) {
   }
   section.classList.remove("hidden");
 
+  // Awaited sequentially, not fired concurrently: Plotly.newPlot() is async,
+  // and unawaited concurrent calls race — verified empirically (the same
+  // race proven for Plotly.Plots.resize() above left one chart's width
+  // matching neither its own container nor any other chart's).
   for (const chart of plottable) {
     const chartDiv = document.createElement("div");
     chartDiv.className = "chart-box";
     container.appendChild(chartDiv);
-    plotBuilder(chartDiv, chart);
+    await plotBuilder(chartDiv, chart);
   }
 }
 
@@ -200,9 +216,9 @@ function binCenters(binEdges) {
   return binEdges.slice(0, -1).map((edge, i) => (edge + binEdges[i + 1]) / 2);
 }
 
-function plotNumericHistogram(div, chart) {
+async function plotNumericHistogram(div, chart) {
   trackPlot(div);
-  Plotly.newPlot(
+  await Plotly.newPlot(
     div,
     [{ x: binCenters(chart.bin_edges), y: chart.counts, type: "bar" }],
     { title: chart.column, margin: { t: 30, l: 40, r: 10, b: 40 }, height: 260 },
@@ -210,9 +226,9 @@ function plotNumericHistogram(div, chart) {
   );
 }
 
-function plotCategoricalBar(div, chart) {
+async function plotCategoricalBar(div, chart) {
   trackPlot(div);
-  Plotly.newPlot(
+  await Plotly.newPlot(
     div,
     [{ x: chart.categories, y: chart.counts, type: "bar" }],
     { title: chart.column, margin: { t: 30, l: 40, r: 10, b: 60 }, height: 260 },
@@ -220,9 +236,9 @@ function plotCategoricalBar(div, chart) {
   );
 }
 
-function plotTextLengthHistogram(div, chart) {
+async function plotTextLengthHistogram(div, chart) {
   trackPlot(div);
-  Plotly.newPlot(
+  await Plotly.newPlot(
     div,
     [{ x: binCenters(chart.bin_edges), y: chart.counts, type: "bar" }],
     {
@@ -234,22 +250,22 @@ function plotTextLengthHistogram(div, chart) {
   );
 }
 
-function renderCharts(chartData) {
+async function renderCharts(chartData) {
   document.getElementById("charts-section").classList.remove("hidden");
-  renderNullHeatmap(chartData.null_heatmap);
-  renderColumnCharts(
+  await renderNullHeatmap(chartData.null_heatmap);
+  await renderColumnCharts(
     "numeric-histograms",
     "numeric-histograms-section",
     chartData.numeric_histograms,
     plotNumericHistogram
   );
-  renderColumnCharts(
+  await renderColumnCharts(
     "categorical-bars",
     "categorical-bars-section",
     chartData.categorical_bars,
     plotCategoricalBar
   );
-  renderColumnCharts(
+  await renderColumnCharts(
     "text-length-histograms",
     "text-length-histograms-section",
     chartData.text_length_histograms,
