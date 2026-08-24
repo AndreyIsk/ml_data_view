@@ -27,6 +27,19 @@ NUMERIC_DTYPE_NAMES = {
 STRING_DTYPE_NAMES = {"String", "Utf8"}
 
 
+def _is_missing(value: Any) -> bool:
+    """True for None or float NaN.
+
+    polars treats NaN as a real (non-null) float value distinct from null,
+    so `.drop_nulls()` alone lets NaN through — but for profiling purposes
+    a NaN is just as "no usable value" as a null, so every place that
+    decides what counts as missing routes through this helper.
+    """
+    if value is None:
+        return True
+    return isinstance(value, float) and value != value  # NaN is the only value != itself
+
+
 def classify_column(df: pl.DataFrame, column: str) -> str:
     """Classify a column for charting purposes.
 
@@ -76,7 +89,9 @@ def _equal_width_histogram(values: list[float], bins: int) -> tuple[list[int], l
 def numeric_histogram_data(
     df: pl.DataFrame, column: str, bins: int = NUMERIC_HISTOGRAM_BINS
 ) -> dict[str, Any]:
-    values = [float(v) for v in df[column].drop_nulls().to_list()]
+    values = [
+        float(v) for v in df[column].drop_nulls().to_list() if not _is_missing(v)
+    ]
     if not values:
         return {"column": column, "bin_edges": [], "counts": []}
 
@@ -119,7 +134,7 @@ def null_heatmap_data(df: pl.DataFrame, max_rows: int = NULL_HEATMAP_MAX_ROWS) -
     column_values = {column: sample_df[column].to_list() for column in columns}
 
     z = [
-        [1 if column_values[column][row_idx] is None else 0 for column in columns]
+        [1 if _is_missing(column_values[column][row_idx]) else 0 for column in columns]
         for row_idx in range(sample_df.height)
     ]
 

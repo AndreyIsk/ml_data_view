@@ -75,6 +75,26 @@ def test_numeric_histogram_data_all_identical_values():
     assert sum(result["counts"]) == 3
 
 
+def test_numeric_histogram_data_excludes_nan_values():
+    df = pl.DataFrame({"score": [1.0, 2.0, float("nan"), 3.0]})
+
+    result = numeric_histogram_data(df, "score", bins=3)
+
+    assert sum(result["counts"]) == 3
+
+
+def test_numeric_histogram_data_does_not_crash_when_nan_sorts_first():
+    # A NaN value earlier in iteration order breaks naive min()/max() (NaN
+    # compares unequal to everything), so this must not raise or produce
+    # NaN bin edges.
+    df = pl.DataFrame({"score": [float("nan"), 0.5, 1.2, 3.0]})
+
+    result = numeric_histogram_data(df, "score", bins=3)
+
+    assert sum(result["counts"]) == 3
+    assert all(edge == edge for edge in result["bin_edges"])  # no NaN edges
+
+
 def test_categorical_bar_data_sorted_by_count_descending():
     df = pl.DataFrame({"label": ["cat", "dog", "cat", "bird", "cat", "dog"]})
 
@@ -155,6 +175,14 @@ def test_null_heatmap_data_marks_nulls_as_one():
     assert result["total_rows"] == 3
     assert result["sampled_rows"] == 3
     assert result["z"] == [[0, 1], [1, 0], [0, 0]]
+
+
+def test_null_heatmap_data_marks_nan_as_missing_too():
+    df = pl.DataFrame({"a": [1.0, float("nan"), 3.0]})
+
+    result = null_heatmap_data(df)
+
+    assert result["z"] == [[0], [1], [0]]
 
 
 def test_null_heatmap_data_caps_sampled_rows():

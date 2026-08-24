@@ -126,6 +126,19 @@ def test_preview_rows_returns_all_when_fewer_than_50(tmp_path):
     assert len(dataset_info.preview_rows) == 3
 
 
+def test_dataset_info_from_df_counts_nan_as_null_for_float_columns(tmp_path):
+    df = pl.DataFrame({"score": [1.0, None, float("nan"), 2.0]})
+    csv_path = tmp_path / "sample.csv"
+    csv_path.write_text("score\n")  # dataset_info_from_df only needs the file to exist
+
+    dataset_info = dataset_info_from_df(df, csv_path)
+
+    columns_by_name = {c.name: c for c in dataset_info.columns}
+    # 1 real null + 1 NaN = 2 "missing" values, consistent with how the
+    # Phase 1 null heatmap treats NaN as missing too.
+    assert columns_by_name["score"].null_count == 2
+
+
 def test_read_dataframe_returns_polars_dataframe(tmp_path):
     csv_path = tmp_path / "sample.csv"
     _sample_df().write_csv(csv_path)

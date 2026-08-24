@@ -77,13 +77,27 @@ def read_dataframe(path: str | Path) -> pl.DataFrame:
     return _dispatch_reader(path, suffix)
 
 
+def _missing_count(series: pl.Series) -> int:
+    """Count null values, plus NaN for float columns.
+
+    polars treats NaN as a real float value distinct from null, so it isn't
+    included in null_count() on its own — but for profiling purposes a NaN
+    is just as "no usable value" as a null. Counting it here keeps this
+    number consistent with the Phase 1 null heatmap, which treats NaN as
+    missing too.
+    """
+    missing = series.null_count()
+    if series.dtype in (pl.Float32, pl.Float64):
+        missing += series.is_nan().sum()
+    return missing
+
+
 def dataset_info_from_df(df: pl.DataFrame, path: str | Path) -> DatasetInfo:
     """Build a DatasetInfo from an already-loaded DataFrame and its source path."""
     path = Path(path)
-    null_counts = df.null_count().to_dicts()[0]
 
     columns = [
-        ColumnInfo(name=name, dtype=str(dtype), null_count=null_counts[name])
+        ColumnInfo(name=name, dtype=str(dtype), null_count=_missing_count(df[name]))
         for name, dtype in df.schema.items()
     ]
     preview_rows = df.head(PREVIEW_ROW_LIMIT).to_dicts()
