@@ -16,6 +16,7 @@ from typing import Any
 import polars as pl
 import webview
 
+from ml_data_view.chart_data import build_chart_payload
 from ml_data_view.data_loader import (
     UnsupportedFileTypeError,
     dataset_info_from_df,
@@ -62,3 +63,9 @@ class Api:
             return {"error": str(exc)}
         self._current_df = df
         return dataset_info_from_df(df, path).to_dict()
+
+    def get_chart_data(self) -> dict[str, Any]:
+        """Return Phase 1 chart data for the most recently loaded dataset."""
+        if self._current_df is None:
+            return {"error": "No dataset loaded yet. Open a file first."}
+        return build_chart_payload(self._current_df)

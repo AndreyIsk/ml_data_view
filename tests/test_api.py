@@ -56,3 +56,25 @@ def test_load_file_does_not_cache_dataframe_on_error(tmp_path):
     api.load_file(str(bad_path))
 
     assert api._current_df is None
+
+
+def test_get_chart_data_returns_error_when_nothing_loaded():
+    api = Api()
+
+    result = api.get_chart_data()
+
+    assert "error" in result
+
+
+def test_get_chart_data_returns_payload_after_load_file(tmp_path):
+    df = pl.DataFrame({"id": [1, 2, 3], "label": ["a", "b", "a"]})
+    csv_path = tmp_path / "sample.csv"
+    df.write_csv(csv_path)
+
+    api = Api()
+    api.load_file(str(csv_path))
+    result = api.get_chart_data()
+
+    assert "error" not in result
+    assert result["null_heatmap"]["columns"] == ["id", "label"]
+    assert [h["column"] for h in result["numeric_histograms"]] == ["id"]
