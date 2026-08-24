@@ -111,3 +111,21 @@ def text_length_histogram_data(
 
     counts, bin_edges = _equal_width_histogram(lengths, bins)
     return {"column": column, "bin_edges": bin_edges, "counts": counts}
+
+
+def null_heatmap_data(df: pl.DataFrame, max_rows: int = NULL_HEATMAP_MAX_ROWS) -> dict[str, Any]:
+    sample_df = df.head(max_rows) if df.height > max_rows else df
+    columns = sample_df.columns
+    column_values = {column: sample_df[column].to_list() for column in columns}
+
+    z = [
+        [1 if column_values[column][row_idx] is None else 0 for column in columns]
+        for row_idx in range(sample_df.height)
+    ]
+
+    return {
+        "columns": columns,
+        "sampled_rows": sample_df.height,
+        "total_rows": df.height,
+        "z": z,
+    }

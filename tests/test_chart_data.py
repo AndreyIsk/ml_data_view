@@ -3,6 +3,7 @@ import polars as pl
 from ml_data_view.chart_data import (
     categorical_bar_data,
     classify_column,
+    null_heatmap_data,
     numeric_histogram_data,
     text_length_histogram_data,
 )
@@ -142,3 +143,33 @@ def test_text_length_histogram_data_empty_column():
     result = text_length_histogram_data(df, "comment")
 
     assert result == {"column": "comment", "bin_edges": [], "counts": []}
+
+
+def test_null_heatmap_data_marks_nulls_as_one():
+    df = pl.DataFrame({"a": [1, None, 3], "b": [None, 2, 3]})
+
+    result = null_heatmap_data(df)
+
+    assert result["columns"] == ["a", "b"]
+    assert result["total_rows"] == 3
+    assert result["sampled_rows"] == 3
+    assert result["z"] == [[0, 1], [1, 0], [0, 0]]
+
+
+def test_null_heatmap_data_caps_sampled_rows():
+    df = pl.DataFrame({"a": list(range(700))})
+
+    result = null_heatmap_data(df, max_rows=500)
+
+    assert result["total_rows"] == 700
+    assert result["sampled_rows"] == 500
+    assert len(result["z"]) == 500
+
+
+def test_null_heatmap_data_no_cap_needed_when_under_limit():
+    df = pl.DataFrame({"a": [1, 2, 3]})
+
+    result = null_heatmap_data(df, max_rows=500)
+
+    assert result["sampled_rows"] == 3
+    assert result["total_rows"] == 3
