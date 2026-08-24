@@ -1,6 +1,6 @@
 import polars as pl
 
-from ml_data_view.chart_data import classify_column, numeric_histogram_data
+from ml_data_view.chart_data import categorical_bar_data, classify_column, numeric_histogram_data
 
 
 def test_classify_column_numeric_dtypes():
@@ -65,4 +65,49 @@ def test_numeric_histogram_data_all_identical_values():
 
     result = numeric_histogram_data(df, "score", bins=5)
 
+    assert sum(result["counts"]) == 3
+
+
+def test_categorical_bar_data_sorted_by_count_descending():
+    df = pl.DataFrame({"label": ["cat", "dog", "cat", "bird", "cat", "dog"]})
+
+    result = categorical_bar_data(df, "label")
+
+    assert result["column"] == "label"
+    assert result["categories"] == ["cat", "dog", "bird"]
+    assert result["counts"] == [3, 2, 1]
+
+
+def test_categorical_bar_data_groups_rest_as_other_beyond_top_n():
+    labels = []
+    for i in range(15):
+        labels += [f"cat_{i}"] * (15 - i)  # cat_0 most frequent, cat_14 least
+    df = pl.DataFrame({"label": labels})
+
+    result = categorical_bar_data(df, "label", top_n=10)
+
+    assert len(result["categories"]) == 11  # top 10 + "Other"
+    assert result["categories"][-1] == "Other"
+    top_10_total = sum(15 - i for i in range(10))
+    rest_total = sum(15 - i for i in range(10, 15))
+    assert result["counts"][:10] == [15 - i for i in range(10)]
+    assert result["counts"][-1] == rest_total
+    assert sum(result["counts"]) == top_10_total + rest_total
+
+
+def test_categorical_bar_data_ignores_nulls():
+    df = pl.DataFrame({"label": ["a", None, "a", None]})
+
+    result = categorical_bar_data(df, "label")
+
+    assert result["categories"] == ["a"]
+    assert result["counts"] == [2]
+
+
+def test_categorical_bar_data_boolean_column():
+    df = pl.DataFrame({"flag": [True, True, False]})
+
+    result = categorical_bar_data(df, "flag")
+
+    assert set(result["categories"]) == {"True", "False"}
     assert sum(result["counts"]) == 3

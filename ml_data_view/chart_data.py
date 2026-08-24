@@ -82,3 +82,18 @@ def numeric_histogram_data(
 
     counts, bin_edges = _equal_width_histogram(values, bins)
     return {"column": column, "bin_edges": bin_edges, "counts": counts}
+
+
+def categorical_bar_data(
+    df: pl.DataFrame, column: str, top_n: int = TOP_N_CATEGORIES
+) -> dict[str, Any]:
+    counts_df = df[column].drop_nulls().value_counts().sort("count", descending=True)
+    categories = [str(v) for v in counts_df[column].to_list()]
+    counts = counts_df["count"].to_list()
+
+    if len(categories) > top_n:
+        other_count = sum(counts[top_n:])
+        categories = categories[:top_n] + ["Other"]
+        counts = counts[:top_n] + [other_count]
+
+    return {"column": column, "categories": categories, "counts": counts}
