@@ -10,41 +10,86 @@ const previewSection = document.getElementById("preview-section");
 const previewTableHead = document.querySelector("#preview-table thead");
 const previewTableBody = document.querySelector("#preview-table tbody");
 
-// Plotly's `responsive: true` relies on an internal ResizeObserver that, in
-// practice, does not reliably fire when a plot's container shrinks because
-// of a layout reflow (e.g. the pywebview window un-maximizing) rather than
-// a direct browser resize — the chart's SVG is left stale, oversized, and
-// overflowing its container, which reads as charts overlapping one
-// another. Tracking every plotted div and forcing an explicit resize on
-// window "resize" (debounced) fixes that regardless of which internal
-// mechanism failed to catch the shrink.
-const plottedDivs = new Set();
-let resizeDebounceTimer = null;
+// --- Chart color roles (dataviz skill's validated reference palette) ---
+// One accent color for every single-series bar/histogram — a dashboard of
+// small multiples reads as one coherent system, not a rainbow. The null
+// heatmap uses a separate severity ramp (status "critical" red, never a
+// categorical hue) since it encodes "how bad is the missingness", not identity.
+const SERIES_COLOR = "#2a78d6"; // categorical slot 1 (blue)
+const MISSING_COLOR = "#d03b3b"; // status: critical
+const PRESENT_COLOR = "#f0efec"; // neutral surface-adjacent gray
+const GRIDLINE_COLOR = "#e2e1dc"; // one-step-off-surface, hairline
+const AXIS_TEXT_COLOR = "#52514e"; // text-secondary — axis text never wears the data color
 
-function trackPlot(div) {
-  plottedDivs.add(div);
+const PLOT_FONT = { family: "system-ui, -apple-system, 'Segoe UI', sans-serif", color: AXIS_TEXT_COLOR, size: 11 };
+
+// Plotly's chart containers need to react to ANY change in their own
+// rendered size — a window resize, a CSS grid reflow that changes the
+// column count, a sidebar toggle — not just a raw browser "resize" event
+// (which pywebview's native window doesn't reliably fire for every OS-level
+// transition, e.g. restoring from maximized). ResizeObserver is the right
+// primitive for that — BUT it must watch a STABLE element that Plotly
+// itself never resizes. Observing the exact div that gets resized creates a
+// feedback loop (each resize re-triggers the observer on itself) — verified
+// empirically: it hung the page outright. Instead, each chart's *stable
+// parent* (the .chart-grid container, or the heatmap's section) is what
+// gets observed; its own box size is pure CSS/grid layout, never written to
+// by Plotly. .chart-plot/#null-heatmap-chart also get a fixed CSS height
+// (see style.css) so Plotly's height handling can't feed back into the
+// grid's auto-row-height either.
+//
+// Resizing itself uses a full Plotly.newPlot() redraw, not
+// Plotly.Plots.resize(): the latter was verified (by decoding actual
+// rendered widths) to leave charts at wrong, inconsistent sizes when
+// called across several divs in sequence — each subsequent chart ended up
+// narrower than the last in a way that didn't match any real container
+// width, and it never self-corrected. A full newPlot() redraw with the
+// same data/layout/config has been reliable in every test, including this
+// exact multi-chart sequential pattern, so resize reuses it instead of a
+// second, less-trustworthy code path. Each div's original arguments are
+// cached in `plotArgs` so a redraw can reuse them.
+const plotArgs = new WeakMap(); // div -> { data, layout, config }
+const activePlotDivs = new Set();
+
+async function drawPlot(div, data, layout, config) {
+  plotArgs.set(div, { data, layout, config });
+  activePlotDivs.add(div);
+  await Plotly.newPlot(div, data, layout, config);
 }
 
-async function resizeTrackedPlots() {
-  // Plotly.Plots.resize() is async (returns a Promise) — awaiting each one
-  // in turn, rather than firing them all concurrently, avoids a race where
-  // overlapping redraws read each other's in-progress layout and end up
-  // with the wrong width (verified empirically: unawaited concurrent
-  // resizes left one chart's SVG matching neither its own container nor
-  // any other chart's width).
-  for (const div of plottedDivs) {
-    if (div.isConnected) {
-      await Plotly.Plots.resize(div);
-    } else {
-      plottedDivs.delete(div);
+function untrackPlot(div) {
+  activePlotDivs.delete(div);
+  plotArgs.delete(div);
+}
+
+let resizeFlushScheduled = false;
+
+async function flushPendingResizes() {
+  resizeFlushScheduled = false;
+  // Awaited sequentially, not fired concurrently: Plotly.newPlot() is
+  // async, and unawaited concurrent calls race — verified empirically
+  // (concurrent calls left one chart's width matching neither its own
+  // container nor any other chart's).
+  for (const div of activePlotDivs) {
+    const args = plotArgs.get(div);
+    if (div.isConnected && args) {
+      await Plotly.newPlot(div, args.data, args.layout, args.config);
     }
   }
 }
 
-window.addEventListener("resize", () => {
-  clearTimeout(resizeDebounceTimer);
-  resizeDebounceTimer = setTimeout(resizeTrackedPlots, 150);
-});
+function scheduleResizeFlush() {
+  if (!resizeFlushScheduled) {
+    resizeFlushScheduled = true;
+    setTimeout(flushPendingResizes, 120);
+  }
+}
+
+const containerResizeObserver = new ResizeObserver(scheduleResizeFlush);
+
+function observeContainer(container) {
+  containerResizeObserver.observe(container);
+}
 
 function formatBytes(bytes) {
   if (bytes < 1024) return `${bytes} B`;
@@ -149,8 +194,8 @@ async function renderNullHeatmap(data) {
   const isBinned = data.display_rows < data.sampled_rows;
   const yLabels = Array.from({ length: data.display_rows }, (_, i) => i);
   const heatmapDiv = document.getElementById("null-heatmap-chart");
-  trackPlot(heatmapDiv);
-  await Plotly.newPlot(
+  observeContainer(section); // stable — Plotly never resizes #null-heatmap-section itself
+  await drawPlot(
     heatmapDiv,
     [
       {
@@ -161,18 +206,26 @@ async function renderNullHeatmap(data) {
         zmin: 0,
         zmax: 1,
         colorscale: [
-          [0, "#f5f5f5"],
-          [1, "#c0392b"],
+          [0, PRESENT_COLOR],
+          [1, MISSING_COLOR],
         ],
         showscale: false,
-        xgap: 1,
+        xgap: 2,
         ygap: 1,
       },
     ],
     {
-      margin: { t: 10, l: 50, r: 10, b: 80 },
+      font: PLOT_FONT,
+      margin: { t: 10, l: 50, r: 10, b: 70 },
       height: 320,
-      yaxis: { title: isBinned ? "Row bin" : "Row index", autorange: "reversed" },
+      paper_bgcolor: "transparent",
+      plot_bgcolor: "transparent",
+      xaxis: { tickfont: PLOT_FONT },
+      yaxis: {
+        title: { text: isBinned ? "Row bin" : "Row index", font: PLOT_FONT },
+        autorange: "reversed",
+        tickfont: PLOT_FONT,
+      },
     },
     { displayModeBar: false, responsive: true }
   );
@@ -191,6 +244,9 @@ async function renderNullHeatmap(data) {
 async function renderColumnCharts(containerId, sectionId, charts, plotBuilder) {
   const container = document.getElementById(containerId);
   const section = document.getElementById(sectionId);
+  for (const oldDiv of container.querySelectorAll(".chart-plot")) {
+    untrackPlot(oldDiv);
+  }
   container.innerHTML = "";
 
   const plottable = charts.filter((chart) => chart.counts && chart.counts.length);
@@ -199,16 +255,33 @@ async function renderColumnCharts(containerId, sectionId, charts, plotBuilder) {
     return;
   }
   section.classList.remove("hidden");
+  observeContainer(container); // stable — Plotly never resizes .chart-grid itself
 
   // Awaited sequentially, not fired concurrently: Plotly.newPlot() is async,
-  // and unawaited concurrent calls race — verified empirically (the same
-  // race proven for Plotly.Plots.resize() above left one chart's width
-  // matching neither its own container nor any other chart's).
+  // and unawaited concurrent calls race — verified empirically (concurrent
+  // calls left one chart's width matching neither its own container nor
+  // any other chart's).
   for (const chart of plottable) {
-    const chartDiv = document.createElement("div");
-    chartDiv.className = "chart-box";
-    container.appendChild(chartDiv);
-    await plotBuilder(chartDiv, chart);
+    const card = document.createElement("div");
+    card.className = "chart-box";
+
+    // Plain HTML title, not Plotly's layout.title: a title Plotly lays out
+    // itself can only ever be as correct as Plotly's current size
+    // computation for that div — if that's stale or wrong (see the resize
+    // fixes above), the title moves with the bug. Plain HTML in normal
+    // document flow can't be mispositioned by a Plotly layout bug.
+    const title = document.createElement("div");
+    title.className = "chart-title";
+    title.textContent = chart.column;
+    title.title = chart.column; // native tooltip if the name is truncated
+    card.appendChild(title);
+
+    const plotDiv = document.createElement("div");
+    plotDiv.className = "chart-plot";
+    card.appendChild(plotDiv);
+
+    container.appendChild(card);
+    await plotBuilder(plotDiv, chart);
   }
 }
 
@@ -216,36 +289,39 @@ function binCenters(binEdges) {
   return binEdges.slice(0, -1).map((edge, i) => (edge + binEdges[i + 1]) / 2);
 }
 
+const BAR_LAYOUT_DEFAULTS = {
+  font: PLOT_FONT,
+  height: 220,
+  bargap: 0.15,
+  paper_bgcolor: "transparent",
+  plot_bgcolor: "transparent",
+  xaxis: { tickfont: PLOT_FONT, gridcolor: GRIDLINE_COLOR, zeroline: false },
+  yaxis: { tickfont: PLOT_FONT, gridcolor: GRIDLINE_COLOR, zeroline: false },
+};
+
 async function plotNumericHistogram(div, chart) {
-  trackPlot(div);
-  await Plotly.newPlot(
+  await drawPlot(
     div,
-    [{ x: binCenters(chart.bin_edges), y: chart.counts, type: "bar" }],
-    { title: chart.column, margin: { t: 30, l: 40, r: 10, b: 40 }, height: 260 },
+    [{ x: binCenters(chart.bin_edges), y: chart.counts, type: "bar", marker: { color: SERIES_COLOR } }],
+    { ...BAR_LAYOUT_DEFAULTS, margin: { t: 10, l: 40, r: 10, b: 30 } },
     { displayModeBar: false, responsive: true }
   );
 }
 
 async function plotCategoricalBar(div, chart) {
-  trackPlot(div);
-  await Plotly.newPlot(
+  await drawPlot(
     div,
-    [{ x: chart.categories, y: chart.counts, type: "bar" }],
-    { title: chart.column, margin: { t: 30, l: 40, r: 10, b: 60 }, height: 260 },
+    [{ x: chart.categories, y: chart.counts, type: "bar", marker: { color: SERIES_COLOR } }],
+    { ...BAR_LAYOUT_DEFAULTS, margin: { t: 10, l: 40, r: 10, b: 50 } },
     { displayModeBar: false, responsive: true }
   );
 }
 
 async function plotTextLengthHistogram(div, chart) {
-  trackPlot(div);
-  await Plotly.newPlot(
+  await drawPlot(
     div,
-    [{ x: binCenters(chart.bin_edges), y: chart.counts, type: "bar" }],
-    {
-      title: `${chart.column} (length)`,
-      margin: { t: 30, l: 40, r: 10, b: 40 },
-      height: 260,
-    },
+    [{ x: binCenters(chart.bin_edges), y: chart.counts, type: "bar", marker: { color: SERIES_COLOR } }],
+    { ...BAR_LAYOUT_DEFAULTS, margin: { t: 10, l: 40, r: 10, b: 30 } },
     { displayModeBar: false, responsive: true }
   );
 }

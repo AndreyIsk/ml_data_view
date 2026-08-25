@@ -14,12 +14,12 @@
 
   <section id="error-banner" class="hidden"></section>
 
-  <section id="summary" class="hidden">
+  <section id="summary" class="panel hidden">
     <div><strong>Rows:</strong> <span id="row-count"></span></div>
     <div><strong>File size:</strong> <span id="file-size"></span></div>
   </section>
 
-  <section id="schema-section" class="hidden">
+  <section id="schema-section" class="panel hidden">
     <h2>Schema</h2>
     <table id="schema-table">
       <thead>
@@ -29,7 +29,7 @@
     </table>
   </section>
 
-  <section id="preview-section" class="hidden">
+  <section id="preview-section" class="panel hidden">
     <h2>Preview (first 50 rows)</h2>
     <div id="preview-wrapper">
       <table id="preview-table">
@@ -39,26 +39,26 @@
     </div>
   </section>
 
-  <section id="charts-section" class="hidden">
+  <section id="charts-section" class="panel hidden">
     <h2>Charts</h2>
 
-    <div id="null-heatmap-section">
+    <div class="chart-subsection" id="null-heatmap-section">
       <h3>Missing-value heatmap</h3>
       <p id="null-heatmap-note" class="chart-note"></p>
-      <div id="null-heatmap-chart"></div>
+      <div id="null-heatmap-chart" class="chart-plot"></div>
     </div>
 
-    <div id="numeric-histograms-section">
+    <div class="chart-subsection" id="numeric-histograms-section">
       <h3>Numeric distributions</h3>
       <div id="numeric-histograms" class="chart-grid"></div>
     </div>
 
-    <div id="categorical-bars-section">
+    <div class="chart-subsection" id="categorical-bars-section">
       <h3>Class balance</h3>
       <div id="categorical-bars" class="chart-grid"></div>
     </div>
 
-    <div id="text-length-histograms-section">
+    <div class="chart-subsection" id="text-length-histograms-section">
       <h3>Text length distributions</h3>
       <div id="text-length-histograms" class="chart-grid"></div>
     </div>
