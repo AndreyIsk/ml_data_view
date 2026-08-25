@@ -289,21 +289,36 @@ function binCenters(binEdges) {
   return binEdges.slice(0, -1).map((edge, i) => (edge + binEdges[i + 1]) / 2);
 }
 
-const BAR_LAYOUT_DEFAULTS = {
-  font: PLOT_FONT,
-  height: 220,
-  bargap: 0.15,
-  paper_bgcolor: "transparent",
-  plot_bgcolor: "transparent",
-  xaxis: { tickfont: PLOT_FONT, gridcolor: GRIDLINE_COLOR, zeroline: false },
-  yaxis: { tickfont: PLOT_FONT, gridcolor: GRIDLINE_COLOR, zeroline: false },
-};
+// A function, not a shared const object: Plotly.newPlot() mutates the
+// layout object it's given in place (writing computed fields like `range`,
+// `autorange`, `type` directly onto layout.xaxis/yaxis for its own
+// bookkeeping). A single BAR_LAYOUT_DEFAULTS const reused via `{...spread}`
+// only shallow-copies the top level — every chart's xaxis/yaxis pointed at
+// the SAME nested objects, so each chart silently overwrote the previous
+// one's axis state. Verified concretely: after rendering, the shared
+// xaxis object had frozen in the *last* chart's numeric range
+// (`{type: "linear", range: [2007, 2009]}`, from a "year" column), which
+// every other chart — including categorical ones — then inherited,
+// showing numeric year-like ticks instead of their own category labels.
+// A factory returning fresh objects on every call closes that off.
+function barLayout(margin) {
+  return {
+    font: PLOT_FONT,
+    height: 220,
+    bargap: 0.15,
+    paper_bgcolor: "transparent",
+    plot_bgcolor: "transparent",
+    margin,
+    xaxis: { tickfont: PLOT_FONT, gridcolor: GRIDLINE_COLOR, zeroline: false },
+    yaxis: { tickfont: PLOT_FONT, gridcolor: GRIDLINE_COLOR, zeroline: false },
+  };
+}
 
 async function plotNumericHistogram(div, chart) {
   await drawPlot(
     div,
     [{ x: binCenters(chart.bin_edges), y: chart.counts, type: "bar", marker: { color: SERIES_COLOR } }],
-    { ...BAR_LAYOUT_DEFAULTS, margin: { t: 10, l: 40, r: 10, b: 30 } },
+    barLayout({ t: 10, l: 40, r: 10, b: 30 }),
     { displayModeBar: false, responsive: true }
   );
 }
@@ -312,7 +327,7 @@ async function plotCategoricalBar(div, chart) {
   await drawPlot(
     div,
     [{ x: chart.categories, y: chart.counts, type: "bar", marker: { color: SERIES_COLOR } }],
-    { ...BAR_LAYOUT_DEFAULTS, margin: { t: 10, l: 40, r: 10, b: 50 } },
+    barLayout({ t: 10, l: 40, r: 10, b: 50 }),
     { displayModeBar: false, responsive: true }
   );
 }
@@ -321,7 +336,7 @@ async function plotTextLengthHistogram(div, chart) {
   await drawPlot(
     div,
     [{ x: binCenters(chart.bin_edges), y: chart.counts, type: "bar", marker: { color: SERIES_COLOR } }],
-    { ...BAR_LAYOUT_DEFAULTS, margin: { t: 10, l: 40, r: 10, b: 30 } },
+    barLayout({ t: 10, l: 40, r: 10, b: 30 }),
     { displayModeBar: false, responsive: true }
   );
 }
