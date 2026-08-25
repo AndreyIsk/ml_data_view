@@ -9,6 +9,25 @@ const schemaTableBody = document.querySelector("#schema-table tbody");
 const previewSection = document.getElementById("preview-section");
 const previewTableHead = document.querySelector("#preview-table thead");
 const previewTableBody = document.querySelector("#preview-table tbody");
+const loadingIndicator = document.getElementById("loading-indicator");
+const loadingMessage = document.getElementById("loading-message");
+
+// A large file's read + chart computation can take a visible moment (still
+// far faster than it used to be — see chart_data.py's polars-native
+// histogram binning — but "far faster" isn't "instant" for a many-million-
+// row file). Comfort here means never leaving the user looking at an
+// unresponsive button with no feedback: show what's happening, and don't
+// let a second click start a second load while one is in flight.
+function showLoading(message) {
+  loadingMessage.textContent = message;
+  loadingIndicator.classList.remove("hidden");
+  openFileBtn.disabled = true;
+}
+
+function hideLoading() {
+  loadingIndicator.classList.add("hidden");
+  openFileBtn.disabled = false;
+}
 
 // --- Chart color roles (dataviz skill's validated reference palette) ---
 // One accent color for every single-series bar/histogram — a dashboard of
@@ -161,19 +180,25 @@ async function handleOpenFile() {
   if (!path) return;
 
   clearError();
-  const data = await window.pywebview.api.load_file(path);
-  if (data.error) {
-    showError(data.error);
-    return;
-  }
-  renderDataset(data);
+  showLoading("Reading file…");
+  try {
+    const data = await window.pywebview.api.load_file(path);
+    if (data.error) {
+      showError(data.error);
+      return;
+    }
+    renderDataset(data);
 
-  const chartData = await window.pywebview.api.get_chart_data();
-  if (chartData.error) {
-    showError(chartData.error);
-    return;
+    showLoading("Computing charts…");
+    const chartData = await window.pywebview.api.get_chart_data();
+    if (chartData.error) {
+      showError(chartData.error);
+      return;
+    }
+    await renderCharts(chartData);
+  } finally {
+    hideLoading();
   }
-  await renderCharts(chartData);
 }
 
 openFileBtn.addEventListener("click", handleOpenFile);

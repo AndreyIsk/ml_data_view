@@ -49,12 +49,39 @@ h1 {
 
 #open-file-btn:hover { background: var(--accent-hover); }
 
+#open-file-btn:disabled {
+  background: var(--text-muted);
+  border-color: var(--text-muted);
+  cursor: default;
+}
+
 #file-path {
   color: var(--text-muted);
   font-size: 0.82rem;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+#loading-indicator {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+}
+
+.spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
 }
 
 .hidden { display: none !important; }

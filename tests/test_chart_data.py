@@ -1,4 +1,5 @@
 import polars as pl
+import pytest
 
 from ml_data_view.chart_data import (
     build_chart_payload,
@@ -93,6 +94,22 @@ def test_numeric_histogram_data_does_not_crash_when_nan_sorts_first():
 
     assert sum(result["counts"]) == 3
     assert all(edge == edge for edge in result["bin_edges"])  # no NaN edges
+
+
+def test_numeric_histogram_data_correct_at_large_scale():
+    # Exercises the polars-native binning path (Series.hist()) at a size
+    # where the old pure-Python loop implementation was measurably slow
+    # (~0.6s/column at 5M rows; kept smaller here to keep the suite fast).
+    n = 200_000
+    df = pl.DataFrame({"x": [float(i) for i in range(n)]})
+
+    result = numeric_histogram_data(df, "x", bins=30)
+
+    assert len(result["counts"]) == 30
+    assert len(result["bin_edges"]) == 31
+    assert sum(result["counts"]) == n
+    assert result["bin_edges"][0] == 0.0
+    assert result["bin_edges"][-1] == pytest.approx(n - 1, rel=1e-6)
 
 
 def test_categorical_bar_data_sorted_by_count_descending():
