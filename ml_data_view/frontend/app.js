@@ -42,6 +42,19 @@ const AXIS_TEXT_COLOR = "#52514e"; // text-secondary — axis text never wears t
 
 const PLOT_FONT = { family: "system-ui, -apple-system, 'Segoe UI', sans-serif", color: AXIS_TEXT_COLOR, size: 11 };
 
+// Embedding scatter color-by (dataviz skill's validated palette, palette.md):
+// scatter is an "all-pairs" chart form — any two categories can land next to
+// each other anywhere in the cloud, unlike a bar chart where only neighboring
+// bars are compared — so only the first 3 categorical slots (of the 8-slot
+// reference palette) validate colorblind-safety across every pair. The
+// backend buckets each color-by column to top-3 + "Other" to match (see
+// embedding_data.EMBEDDING_COLOR_TOP_N); "Other"/"Missing" get non-identity
+// neutrals, never a 4th hue.
+const EMBEDDING_CATEGORICAL_COLORS = ["#2a78d6", "#eb6834", "#1baf7a"]; // slots 1-3: blue, orange, aqua
+const EMBEDDING_OTHER_COLOR = "#898781"; // muted ink — non-identity bucket
+const EMBEDDING_MISSING_COLOR = "#c3c2b7"; // baseline/border gray — distinct neutral from "Other"
+const MARKER_SURFACE_RING = "#ffffff"; // surface color — separates overlapping markers, not a data-carrying stroke
+
 // Plotly's chart containers need to react to ANY change in their own
 // rendered size — a window resize, a CSS grid reflow that changes the
 // column count, a sidebar toggle — not just a raw browser "resize" event
@@ -366,6 +379,149 @@ async function plotTextLengthHistogram(div, chart) {
   );
 }
 
+function scatterLayout(margin) {
+  return {
+    font: PLOT_FONT,
+    height: 320,
+    paper_bgcolor: "transparent",
+    plot_bgcolor: "transparent",
+    margin,
+    xaxis: { title: { text: "PC1", font: PLOT_FONT }, tickfont: PLOT_FONT, gridcolor: GRIDLINE_COLOR, zeroline: false },
+    yaxis: { title: { text: "PC2", font: PLOT_FONT }, tickfont: PLOT_FONT, gridcolor: GRIDLINE_COLOR, zeroline: false },
+    legend: { font: PLOT_FONT },
+  };
+}
+
+// One Plotly trace per label bucket, so Plotly generates the legend for free
+// (dataviz skill: identity is never color-alone — the legend's text label is
+// what makes "Other"/"Missing" and the top-3 categories distinguishable, on
+// top of color). `labels` is null when no color-by column is selected.
+function buildEmbeddingTraces(x, y, labels) {
+  if (!labels) {
+    return [
+      {
+        x,
+        y,
+        type: "scattergl",
+        mode: "markers",
+        name: "points",
+        showlegend: false,
+        marker: { size: 8, color: SERIES_COLOR, opacity: 0.85, line: { width: 2, color: MARKER_SURFACE_RING } },
+        hovertemplate: "PC1: %{x:.3f}<br>PC2: %{y:.3f}<extra></extra>",
+      },
+    ];
+  }
+
+  const groups = new Map();
+  labels.forEach((label, i) => {
+    if (!groups.has(label)) groups.set(label, { x: [], y: [] });
+    const group = groups.get(label);
+    group.x.push(x[i]);
+    group.y.push(y[i]);
+  });
+
+  // Backend caps color-by at top-3 categories + "Other"/"Missing" (see
+  // embedding_data.EMBEDDING_COLOR_TOP_N), so at most 3 non-bucket labels —
+  // order of first appearance is enough to hand them out slots 1-3.
+  const categoryOrder = [...groups.keys()].filter((label) => label !== "Other" && label !== "Missing");
+  const orderedLabels = [...categoryOrder, ...(groups.has("Other") ? ["Other"] : []), ...(groups.has("Missing") ? ["Missing"] : [])];
+
+  return orderedLabels.map((label) => {
+    let color;
+    if (label === "Other") color = EMBEDDING_OTHER_COLOR;
+    else if (label === "Missing") color = EMBEDDING_MISSING_COLOR;
+    else color = EMBEDDING_CATEGORICAL_COLORS[categoryOrder.indexOf(label)];
+
+    const group = groups.get(label);
+    return {
+      x: group.x,
+      y: group.y,
+      type: "scattergl",
+      mode: "markers",
+      name: label,
+      marker: { size: 8, color, opacity: 0.85, line: { width: 2, color: MARKER_SURFACE_RING } },
+      hovertemplate: `${label}<br>PC1: %{x:.3f}<br>PC2: %{y:.3f}<extra></extra>`,
+    };
+  });
+}
+
+async function drawEmbeddingScatter(plotDiv, projection, colorByColumn) {
+  const labels = colorByColumn ? projection.categorical_colors[colorByColumn] : null;
+  const traces = buildEmbeddingTraces(projection.x, projection.y, labels);
+  const layout = scatterLayout({ t: 10, l: 50, r: 10, b: 40 });
+  layout.showlegend = traces.length > 1;
+  await drawPlot(plotDiv, traces, layout, { displayModeBar: false, responsive: true });
+}
+
+function renderEmbeddingCard(projection) {
+  const card = document.createElement("div");
+  card.className = "embedding-card";
+
+  const plotDiv = document.createElement("div");
+  plotDiv.className = "embedding-plot chart-plot";
+
+  const header = document.createElement("div");
+  header.className = "embedding-card-header";
+
+  const title = document.createElement("div");
+  title.className = "chart-title";
+  title.textContent = projection.column;
+  title.title = projection.column;
+  header.appendChild(title);
+
+  const colorByColumns = Object.keys(projection.categorical_colors);
+  if (colorByColumns.length) {
+    const colorByWrap = document.createElement("label");
+    colorByWrap.className = "embedding-color-by";
+    colorByWrap.textContent = "Color by ";
+    const select = document.createElement("select");
+    select.appendChild(new Option("None", ""));
+    for (const column of colorByColumns) {
+      select.appendChild(new Option(column, column));
+    }
+    colorByWrap.appendChild(select);
+    header.appendChild(colorByWrap);
+
+    select.addEventListener("change", () => {
+      drawEmbeddingScatter(plotDiv, projection, select.value || null);
+    });
+  }
+  card.appendChild(header);
+
+  if (projection.is_sample) {
+    const note = document.createElement("p");
+    note.className = "chart-note";
+    note.textContent = `Showing a random sample of ${projection.sampled_rows.toLocaleString()} of ${projection.total_rows.toLocaleString()} rows.`;
+    card.appendChild(note);
+  }
+
+  card.appendChild(plotDiv);
+  return { card, plotDiv };
+}
+
+async function renderEmbeddingProjections(projections) {
+  const container = document.getElementById("embedding-projections");
+  const section = document.getElementById("embedding-projections-section");
+  for (const oldDiv of container.querySelectorAll(".embedding-plot")) {
+    untrackPlot(oldDiv);
+  }
+  container.innerHTML = "";
+
+  const plottable = (projections || []).filter((p) => p.x.length);
+  if (!plottable.length) {
+    section.classList.add("hidden");
+    return;
+  }
+  section.classList.remove("hidden");
+  observeContainer(container); // stable — Plotly never resizes #embedding-projections itself
+
+  for (const projection of plottable) {
+    const { card, plotDiv } = renderEmbeddingCard(projection);
+    container.appendChild(card);
+    await drawEmbeddingScatter(plotDiv, projection, null);
+  }
+}
+
 async function renderCharts(chartData) {
   document.getElementById("charts-section").classList.remove("hidden");
   await renderNullHeatmap(chartData.null_heatmap);
@@ -387,4 +543,5 @@ async function renderCharts(chartData) {
     chartData.text_length_histograms,
     plotTextLengthHistogram
   );
+  await renderEmbeddingProjections(chartData.embedding_projections);
 }

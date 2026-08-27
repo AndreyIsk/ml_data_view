@@ -42,25 +42,23 @@ training dataset without writing pandas code every time.
 
 
 
-\## Current phase: PHASE 1
+\## Current phase: PHASE 2
 
 Build exactly this and stop:
 
-\- Null/missing-value heatmap across columns
+\- Detect embedding columns: any column typed as a list of floats (fixed-size or variable-length) with a consistent length across rows, greater than 8 dimensions
 
-\- Histograms for numeric columns
+\- For each detected embedding column, project to 2D via PCA (scikit-learn) and show it as a Plotly scatter plot
 
-\- Bar charts showing class balance for categorical columns (top N categories, rest grouped as "Other")
+\- If the dataset has a categorical column, let the user pick one to color the scatter points by (unpicked = single color)
 
-\- Length-distribution histogram for text/string columns
+\- For datasets over 10,000 rows, randomly sample down to 10,000 rows before running PCA and plotting, and show a note in the UI that it's a sample
 
-\- Charts render for the currently loaded dataset (Phase 0's file picker/schema/table view), read-only — no data editing
+\- UMAP is not part of this pass — PCA only, per the roadmap's "PCA then UMAP" note; UMAP stays open for a later pass if needed
 
 
 
 \## Explicit non-goals right now
-
-\- Do not build the embedding projection feature yet (that's Phase 2)
 
 \- Do not touch the LLM custom-chart feature yet (that's Phase 4)
 

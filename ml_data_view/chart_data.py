@@ -12,6 +12,8 @@ from typing import Any
 
 import polars as pl
 
+from ml_data_view.embedding_data import detect_embedding_columns, embedding_projection_data
+
 NUMERIC_HISTOGRAM_BINS = 30
 TEXT_LENGTH_HISTOGRAM_BINS = 30
 TOP_N_CATEGORIES = 10
@@ -193,10 +195,11 @@ def null_heatmap_data(
 
 
 def build_chart_payload(df: pl.DataFrame) -> dict[str, Any]:
-    """Compute every Phase 1 chart's data for the given DataFrame."""
+    """Compute every Phase 1+2 chart's data for the given DataFrame."""
     numeric_histograms = []
     categorical_bars = []
     text_length_histograms = []
+    categorical_columns = []
 
     for column in df.columns:
         chart_type = classify_column(df, column)
@@ -204,14 +207,28 @@ def build_chart_payload(df: pl.DataFrame) -> dict[str, Any]:
             numeric_histograms.append(numeric_histogram_data(df, column))
         elif chart_type == "categorical":
             categorical_bars.append(categorical_bar_data(df, column))
+            categorical_columns.append(column)
         elif chart_type == "text":
             text_length_histograms.append(text_length_histogram_data(df, column))
         # "unsupported" columns (e.g. Date/Datetime) get no per-column chart
         # yet, but are still included in the null heatmap below.
+
+    # Phase 2: embedding columns (list-of-float, consistent length > 8 dims)
+    # get a PCA-projected scatter plot, colorable by any categorical column
+    # found above. Detection is cheap (schema + length check); the PCA
+    # itself is bounded by embedding_projection_data's row sampling, so
+    # computing it eagerly here for every detected column stays cheap too.
+    embedding_columns = detect_embedding_columns(df)
+    embedding_projections = [
+        embedding_projection_data(df, embedding["column"], categorical_columns=categorical_columns)
+        for embedding in embedding_columns
+    ]
 
     return {
         "null_heatmap": null_heatmap_data(df),
         "numeric_histograms": numeric_histograms,
         "categorical_bars": categorical_bars,
         "text_length_histograms": text_length_histograms,
+        "embedding_columns": embedding_columns,
+        "embedding_projections": embedding_projections,
     }

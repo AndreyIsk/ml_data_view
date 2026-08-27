@@ -287,3 +287,31 @@ def test_build_chart_payload_skips_unsupported_dtypes():
     text_columns = [t["column"] for t in payload["text_length_histograms"]]
     assert "created_at" not in numeric_columns + categorical_columns + text_columns
     assert "created_at" in payload["null_heatmap"]["columns"]
+
+
+def test_build_chart_payload_includes_embedding_projection_for_detected_column():
+    df = pl.DataFrame(
+        {
+            "vec": [[float(row * 16 + d) for d in range(16)] for row in range(4)],
+            "label": ["cat", "dog", "cat", "dog"],
+        },
+        schema={"vec": pl.List(pl.Float64), "label": pl.String},
+    )
+
+    payload = build_chart_payload(df)
+
+    assert payload["embedding_columns"] == [{"column": "vec", "dimensions": 16}]
+    assert len(payload["embedding_projections"]) == 1
+    projection = payload["embedding_projections"][0]
+    assert projection["column"] == "vec"
+    assert len(projection["x"]) == 4
+    assert "label" in projection["categorical_colors"]
+
+
+def test_build_chart_payload_embedding_lists_empty_without_embedding_column():
+    df = pl.DataFrame({"id": [1, 2, 3], "label": ["cat", "dog", "cat"]})
+
+    payload = build_chart_payload(df)
+
+    assert payload["embedding_columns"] == []
+    assert payload["embedding_projections"] == []

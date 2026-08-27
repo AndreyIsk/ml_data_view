@@ -210,3 +210,49 @@ th {
   width: 100%;
   height: 320px;
 }
+
+.embedding-card {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 12px 14px 4px;
+  background: var(--surface-1);
+  margin-bottom: 14px;
+}
+
+.embedding-card:last-child {
+  margin-bottom: 0;
+}
+
+.embedding-card-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 2px;
+}
+
+.embedding-color-by {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+}
+
+.embedding-color-by select {
+  font: inherit;
+  font-size: 0.82rem;
+  color: var(--text-primary);
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 3px 8px;
+}
+
+/* Fixed height, same rationale as .chart-plot above: keeps Plotly's own
+   resize handling from feeding back into the layout this card observes. */
+.embedding-plot {
+  width: 100%;
+  height: 320px;
+}
