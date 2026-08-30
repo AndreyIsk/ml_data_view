@@ -9,7 +9,7 @@ def test_detect_embedding_columns_finds_consistent_float_list_above_threshold():
         schema={"vec": pl.List(pl.Float64)},
     )
 
-    result = detect_embedding_columns(df)
+    result = detect_embedding_columns(df.lazy())
 
     assert result == [{"column": "vec", "dimensions": 16}]
 
@@ -20,7 +20,7 @@ def test_detect_embedding_columns_rejects_length_at_threshold():
         schema={"vec": pl.List(pl.Float64)},
     )
 
-    assert detect_embedding_columns(df) == []
+    assert detect_embedding_columns(df.lazy()) == []
 
 
 def test_detect_embedding_columns_rejects_inconsistent_lengths():
@@ -29,7 +29,7 @@ def test_detect_embedding_columns_rejects_inconsistent_lengths():
         schema={"vec": pl.List(pl.Float64)},
     )
 
-    assert detect_embedding_columns(df) == []
+    assert detect_embedding_columns(df.lazy()) == []
 
 
 def test_detect_embedding_columns_finds_fixed_size_array_above_threshold():
@@ -38,7 +38,7 @@ def test_detect_embedding_columns_finds_fixed_size_array_above_threshold():
         schema={"vec": pl.Array(pl.Float32, 32)},
     )
 
-    result = detect_embedding_columns(df)
+    result = detect_embedding_columns(df.lazy())
 
     assert result == [{"column": "vec", "dimensions": 32}]
 
@@ -49,7 +49,7 @@ def test_detect_embedding_columns_rejects_small_fixed_size_array():
         schema={"vec": pl.Array(pl.Float32, 4)},
     )
 
-    assert detect_embedding_columns(df) == []
+    assert detect_embedding_columns(df.lazy()) == []
 
 
 def test_detect_embedding_columns_rejects_integer_lists():
@@ -58,7 +58,7 @@ def test_detect_embedding_columns_rejects_integer_lists():
         schema={"vec": pl.List(pl.Int64)},
     )
 
-    assert detect_embedding_columns(df) == []
+    assert detect_embedding_columns(df.lazy()) == []
 
 
 def test_detect_embedding_columns_tolerates_null_list_entries():
@@ -67,7 +67,7 @@ def test_detect_embedding_columns_tolerates_null_list_entries():
         schema={"vec": pl.List(pl.Float64)},
     )
 
-    result = detect_embedding_columns(df)
+    result = detect_embedding_columns(df.lazy())
 
     assert result == [{"column": "vec", "dimensions": 16}]
 
@@ -75,7 +75,7 @@ def test_detect_embedding_columns_tolerates_null_list_entries():
 def test_detect_embedding_columns_ignores_non_list_columns():
     df = pl.DataFrame({"score": [1.0, 2.0, 3.0], "label": ["a", "b", "c"]})
 
-    assert detect_embedding_columns(df) == []
+    assert detect_embedding_columns(df.lazy()) == []
 
 
 def _embedding_df(n_rows: int, dimensions: int = 16) -> pl.DataFrame:
@@ -88,7 +88,7 @@ def _embedding_df(n_rows: int, dimensions: int = 16) -> pl.DataFrame:
 def test_embedding_projection_data_returns_a_2d_point_per_row():
     df = _embedding_df(5)
 
-    result = embedding_projection_data(df, "vec", categorical_columns=[])
+    result = embedding_projection_data(df.lazy(), "vec", categorical_columns=[])
 
     assert len(result["x"]) == 5
     assert len(result["y"]) == 5
@@ -104,7 +104,7 @@ def test_embedding_projection_data_excludes_rows_with_null_embedding():
         pl.when(pl.int_range(pl.len()) == 2).then(None).otherwise(pl.col("vec")).alias("vec")
     )
 
-    result = embedding_projection_data(df, "vec", categorical_columns=[])
+    result = embedding_projection_data(df.lazy(), "vec", categorical_columns=[])
 
     assert len(result["x"]) == 4
     assert len(result["y"]) == 4
@@ -114,7 +114,7 @@ def test_embedding_projection_data_excludes_rows_with_null_embedding():
 def test_embedding_projection_data_samples_when_over_max():
     df = _embedding_df(8)
 
-    result = embedding_projection_data(df, "vec", categorical_columns=[], sample_max=5)
+    result = embedding_projection_data(df.lazy(), "vec", categorical_columns=[], sample_max=5)
 
     assert result["is_sample"] is True
     assert result["sampled_rows"] == 5
@@ -125,7 +125,7 @@ def test_embedding_projection_data_samples_when_over_max():
 def test_embedding_projection_data_does_not_sample_at_or_below_max():
     df = _embedding_df(5)
 
-    result = embedding_projection_data(df, "vec", categorical_columns=[], sample_max=5)
+    result = embedding_projection_data(df.lazy(), "vec", categorical_columns=[], sample_max=5)
 
     assert result["is_sample"] is False
     assert result["sampled_rows"] == 5
@@ -139,7 +139,7 @@ def test_embedding_projection_data_buckets_categorical_labels_top_n_and_missing(
     categories = ["c0"] * 5 + ["c1"] * 4 + ["c2"] * 3 + ["c3"] * 1 + [None, None]
     df = _embedding_df(len(categories)).with_columns(pl.Series("cat", categories))
 
-    result = embedding_projection_data(df, "vec", categorical_columns=["cat"], sample_max=1000)
+    result = embedding_projection_data(df.lazy(), "vec", categorical_columns=["cat"], sample_max=1000)
 
     labels = result["categorical_colors"]["cat"]
     assert len(labels) == len(categories)
@@ -154,7 +154,7 @@ def test_embedding_projection_data_buckets_categorical_labels_top_n_and_missing(
 def test_embedding_projection_data_handles_fewer_than_two_usable_rows():
     df = _embedding_df(1)
 
-    result = embedding_projection_data(df, "vec", categorical_columns=[])
+    result = embedding_projection_data(df.lazy(), "vec", categorical_columns=[])
 
     assert result["x"] == []
     assert result["y"] == []

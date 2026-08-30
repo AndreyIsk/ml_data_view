@@ -1,0 +1,126 @@
+from ml_data_view.settings import (
+    DEFAULT_BANNER_COLOR,
+    AppSettings,
+    load_settings,
+    save_settings,
+    settings_file_path,
+)
+
+
+def test_load_settings_returns_defaults_when_no_file_exists(tmp_path):
+    settings = load_settings(tmp_path)
+
+    assert settings == AppSettings(
+        classification_banner_enabled=False,
+        classification_banner_label="",
+        classification_banner_color=DEFAULT_BANNER_COLOR,
+        audit_log_enabled=False,
+    )
+
+
+def test_save_then_load_round_trips_all_fields(tmp_path):
+    settings = AppSettings(
+        classification_banner_enabled=True,
+        classification_banner_label="TOP SECRET // NOFORN",
+        classification_banner_color="#d03b3b",
+        audit_log_enabled=True,
+    )
+
+    save_settings(settings, tmp_path)
+    loaded = load_settings(tmp_path)
+
+    assert loaded == settings
+
+
+def test_save_settings_writes_file_at_settings_file_path(tmp_path):
+    save_settings(AppSettings(audit_log_enabled=True), tmp_path)
+
+    assert settings_file_path(tmp_path).exists()
+
+
+def test_save_settings_creates_missing_parent_directories(tmp_path):
+    nested_dir = tmp_path / "does" / "not" / "exist" / "yet"
+
+    save_settings(AppSettings(), nested_dir)
+
+    assert settings_file_path(nested_dir).exists()
+
+
+def test_load_settings_merges_partial_file_with_defaults(tmp_path):
+    settings_file_path(tmp_path).parent.mkdir(parents=True, exist_ok=True)
+    settings_file_path(tmp_path).write_text('{"audit_log_enabled": true}', encoding="utf-8")
+
+    loaded = load_settings(tmp_path)
+
+    assert loaded.audit_log_enabled is True
+    assert loaded.classification_banner_enabled is False
+    assert loaded.classification_banner_color == DEFAULT_BANNER_COLOR
+
+
+def test_load_settings_ignores_unknown_fields_in_file(tmp_path):
+    settings_file_path(tmp_path).parent.mkdir(parents=True, exist_ok=True)
+    settings_file_path(tmp_path).write_text(
+        '{"audit_log_enabled": true, "future_field": "surprise"}', encoding="utf-8"
+    )
+
+    loaded = load_settings(tmp_path)
+
+    assert loaded.audit_log_enabled is True
+
+
+def test_load_settings_returns_defaults_on_corrupt_json(tmp_path):
+    settings_file_path(tmp_path).parent.mkdir(parents=True, exist_ok=True)
+    settings_file_path(tmp_path).write_text("not valid json {{{", encoding="utf-8")
+
+    loaded = load_settings(tmp_path)
+
+    assert loaded == AppSettings()
+
+
+# --- saved searches ---
+
+
+def test_saved_search_round_trips_through_the_settings_file(tmp_path):
+    from ml_data_view.settings import upsert_saved_search
+
+    settings = upsert_saved_search(
+        AppSettings(), "high tracks", [{"column": "height", "operator": ">=", "values": ["1000"]}], ["height"]
+    )
+    save_settings(settings, tmp_path)
+
+    reloaded = load_settings(tmp_path)
+    assert len(reloaded.saved_searches) == 1
+    assert reloaded.saved_searches[0]["name"] == "high tracks"
+    assert reloaded.saved_searches[0]["columns"] == ["height"]
+
+
+def test_saving_an_existing_name_overwrites_rather_than_duplicating():
+    from ml_data_view.settings import upsert_saved_search
+
+    settings = upsert_saved_search(AppSettings(), "s", [{"a": 1}], None)
+    settings = upsert_saved_search(settings, "s", [{"b": 2}], None)
+
+    assert len(settings.saved_searches) == 1
+    assert settings.saved_searches[0]["conditions"] == [{"b": 2}]
+
+
+def test_removing_a_saved_search_and_removing_a_missing_one(tmp_path):
+    from ml_data_view.settings import remove_saved_search, upsert_saved_search
+
+    settings = upsert_saved_search(AppSettings(), "a", [], None)
+    settings = upsert_saved_search(settings, "b", [], None)
+
+    settings = remove_saved_search(settings, "a")
+    assert [s["name"] for s in settings.saved_searches] == ["b"]
+
+    # A stale UI list may ask to remove something already gone.
+    assert remove_saved_search(settings, "gone").saved_searches == settings.saved_searches
+
+
+def test_an_unnamed_saved_search_is_rejected():
+    import pytest
+
+    from ml_data_view.settings import upsert_saved_search
+
+    with pytest.raises(ValueError):
+        upsert_saved_search(AppSettings(), "   ", [], None)

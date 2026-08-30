@@ -1,13 +1,17 @@
+import pyarrow as pa
+import pyarrow.parquet as pq
 import polars as pl
 import pytest
 
+import ml_data_view.data_loader as data_loader_module
 from ml_data_view.data_loader import (
     ColumnInfo,
     DatasetInfo,
     UnsupportedFileTypeError,
-    dataset_info_from_df,
+    dataset_info_from_lazy,
     load_dataset,
-    read_dataframe,
+    row_count,
+    scan_dataframe,
 )
 
 
@@ -126,12 +130,12 @@ def test_preview_rows_returns_all_when_fewer_than_50(tmp_path):
     assert len(dataset_info.preview_rows) == 3
 
 
-def test_dataset_info_from_df_counts_nan_as_null_for_float_columns(tmp_path):
+def test_dataset_info_from_lazy_counts_nan_as_null_for_float_columns(tmp_path):
     df = pl.DataFrame({"score": [1.0, None, float("nan"), 2.0]})
-    csv_path = tmp_path / "sample.csv"
-    csv_path.write_text("score\n")  # dataset_info_from_df only needs the file to exist
+    parquet_path = tmp_path / "sample.parquet"
+    df.write_parquet(parquet_path)  # parquet round-trips NaN exactly, unlike CSV
 
-    dataset_info = dataset_info_from_df(df, csv_path)
+    dataset_info = dataset_info_from_lazy(pl.scan_parquet(parquet_path), parquet_path)
 
     columns_by_name = {c.name: c for c in dataset_info.columns}
     # 1 real null + 1 NaN = 2 "missing" values, consistent with how the
@@ -139,22 +143,188 @@ def test_dataset_info_from_df_counts_nan_as_null_for_float_columns(tmp_path):
     assert columns_by_name["score"].null_count == 2
 
 
-def test_read_dataframe_returns_polars_dataframe(tmp_path):
+def test_scan_dataframe_returns_lazyframe(tmp_path):
     csv_path = tmp_path / "sample.csv"
     _sample_df().write_csv(csv_path)
 
-    df = read_dataframe(csv_path)
+    lf = scan_dataframe(csv_path)
 
-    assert isinstance(df, pl.DataFrame)
-    assert df.height == 4
+    assert isinstance(lf, pl.LazyFrame)
+    assert row_count(lf) == 4
 
 
-def test_dataset_info_from_df_matches_load_dataset(tmp_path):
+def test_preview_rows_replaces_binary_values_with_placeholder(tmp_path):
+    # Raw bytes aren't JSON-safe across the pywebview js_api bridge — a
+    # Binary column (e.g. an image-as-bytes column, Phase 3) must not put
+    # bytes objects into preview_rows.
+    df = pl.DataFrame({"id": [1, 2], "blob": [b"\xff\xd8\xff\x00abc", None]})
+    parquet_path = tmp_path / "sample.parquet"
+    df.write_parquet(parquet_path)
+
+    dataset_info = dataset_info_from_lazy(pl.scan_parquet(parquet_path), parquet_path)
+
+    assert dataset_info.preview_rows[0]["blob"] == "<binary: 7 bytes>"
+    assert dataset_info.preview_rows[1]["blob"] is None
+
+
+def test_dataset_info_from_lazy_matches_load_dataset(tmp_path):
     csv_path = tmp_path / "sample.csv"
     _sample_df().write_csv(csv_path)
 
-    df = read_dataframe(csv_path)
-    via_helper = dataset_info_from_df(df, csv_path)
+    lf = scan_dataframe(csv_path)
+    via_helper = dataset_info_from_lazy(lf, csv_path)
     via_load_dataset = load_dataset(csv_path)
 
     assert via_helper.to_dict() == via_load_dataset.to_dict()
+
+
+def test_parquet_null_counts_come_from_metadata_not_a_decode(tmp_path, monkeypatch):
+    """The whole point of the fix: a parquet file whose columns all have
+    footer statistics must never build a decode-based null_count_expr —
+    proves the metadata path is actually taken, not just correct by
+    coincidence."""
+    parquet_path = tmp_path / "sample.parquet"
+    _sample_df().write_parquet(parquet_path)  # pyarrow writes stats by default
+
+    def _fail_if_called(name, dtype):
+        raise AssertionError(f"decode-based null count fallback used for column {name!r}")
+
+    monkeypatch.setattr(data_loader_module, "_null_count_expr", _fail_if_called)
+
+    dataset_info = load_dataset(parquet_path)
+
+    columns_by_name = {c.name: c for c in dataset_info.columns}
+    assert columns_by_name["label"].null_count == 1
+    assert columns_by_name["id"].null_count == 0
+
+
+def test_parquet_null_counts_still_count_nan_for_float_columns_via_metadata_path(tmp_path):
+    df = pl.DataFrame({"score": [1.0, None, float("nan"), 2.0]})
+    parquet_path = tmp_path / "sample.parquet"
+    df.write_parquet(parquet_path)
+
+    dataset_info = load_dataset(parquet_path)
+
+    columns_by_name = {c.name: c for c in dataset_info.columns}
+    # 1 real null (from metadata) + 1 NaN (from the small float-only
+    # streaming aggregation) = 2, same result as the old fully-decoded path.
+    assert columns_by_name["score"].null_count == 2
+
+
+def test_parquet_null_counts_sum_across_multiple_files(tmp_path):
+    file1 = tmp_path / "part1.parquet"
+    file2 = tmp_path / "part2.parquet"
+    pl.DataFrame({"id": [1, 2, None]}).write_parquet(file1)
+    pl.DataFrame({"id": [None, None, 5]}).write_parquet(file2)
+
+    lf = pl.concat([pl.scan_parquet(file1), pl.scan_parquet(file2)], how="vertical")
+    dataset_info = dataset_info_from_lazy(lf, tmp_path, files=[file1, file2])
+
+    columns_by_name = {c.name: c for c in dataset_info.columns}
+    assert columns_by_name["id"].null_count == 3
+    assert dataset_info.row_count == 6
+
+
+def test_parquet_null_counts_fall_back_per_column_when_stats_missing(tmp_path):
+    """Parquet statistics are optional per the spec. A file written
+    without them must still get a correct null count for that column, via
+    the decode-based fallback — scoped to just that column, not the whole
+    file (verified indirectly: the untouched-by-fallback column's count is
+    also still correct, meaning it came from metadata as normal)."""
+    table = pa.table({"no_stats": [1, None, 3], "has_stats": [None, 2, 3]})
+    parquet_path = tmp_path / "sample.parquet"
+    pq.write_table(table, parquet_path, column_encoding=None, use_dictionary=False, write_statistics=["has_stats"])
+
+    dataset_info = load_dataset(parquet_path)
+
+    columns_by_name = {c.name: c for c in dataset_info.columns}
+    assert columns_by_name["no_stats"].null_count == 1
+    assert columns_by_name["has_stats"].null_count == 1
+
+
+def test_non_parquet_multi_file_null_counts_still_use_decode_path(tmp_path):
+    """files= is given but they're not parquet (arrow) — the metadata path
+    must not be attempted; falls back to the pre-existing decode behavior
+    for every column, unchanged."""
+    file1 = tmp_path / "part1.arrow"
+    file2 = tmp_path / "part2.arrow"
+    pl.DataFrame({"id": [1, 2, None]}).write_ipc(file1)
+    pl.DataFrame({"id": [None, None, 5]}).write_ipc(file2)
+
+    lf = pl.concat([pl.scan_ipc(file1), pl.scan_ipc(file2)], how="vertical")
+    dataset_info = dataset_info_from_lazy(lf, tmp_path, files=[file1, file2])
+
+    columns_by_name = {c.name: c for c in dataset_info.columns}
+    assert columns_by_name["id"].null_count == 3
+
+
+def _write_parts(tmp_path, count):
+    files = []
+    for i in range(count):
+        path = tmp_path / f"part{i}.parquet"
+        pl.DataFrame({"id": [1, None, 3], "s": ["a", "b", None]}).write_parquet(path)
+        files.append(path)
+    return files
+
+
+def test_null_counts_reports_each_file_as_it_completes(tmp_path):
+    files = _write_parts(tmp_path, 4)
+    schema = pl.scan_parquet(files[0]).collect_schema()
+    seen = []
+
+    data_loader_module._null_counts(
+        pl.scan_parquet(files[0]), schema, files=files, on_file=lambda i, p: seen.append((i, p))
+    )
+
+    # One callback per file, in order, AFTER that file is fully counted.
+    assert [i for i, _ in seen] == [0, 1, 2, 3]
+    assert [p for _, p in seen] == files
+
+
+def test_null_counts_stops_early_when_cancelled_and_counts_only_finished_files(tmp_path):
+    files = _write_parts(tmp_path, 4)
+    schema = pl.scan_parquet(files[0]).collect_schema()
+    done = []
+
+    # Cancel once two files are complete.
+    counts = data_loader_module._null_counts(
+        pl.scan_parquet(files[0]),
+        schema,
+        files=files,
+        on_file=lambda i, p: done.append(i),
+        should_cancel=lambda: len(done) >= 2,
+    )
+
+    assert done == [0, 1]
+    # 1 null per column per file x 2 completed files — NOT all 4.
+    assert counts["id"] == 2
+    assert counts["s"] == 2
+
+
+def test_dataset_info_from_lazy_accepts_precomputed_null_counts(tmp_path):
+    parquet_path = tmp_path / "sample.parquet"
+    _sample_df().write_parquet(parquet_path)
+
+    # Deliberately wrong values come straight through, proving they are
+    # reused rather than recomputed (same contract as total_rows).
+    info = dataset_info_from_lazy(
+        pl.scan_parquet(parquet_path),
+        parquet_path,
+        files=[parquet_path],
+        null_counts={"id": 111, "label": 222, "score": 333},
+    )
+
+    assert {c.name: c.null_count for c in info.columns} == {"id": 111, "label": 222, "score": 333}
+
+
+def test_dataset_info_from_lazy_reuses_a_precomputed_total_rows(tmp_path):
+    csv_path = tmp_path / "sample.csv"
+    _sample_df().write_csv(csv_path)
+    lf = scan_dataframe(csv_path)
+
+    # A wrong precomputed value should come straight through unchecked —
+    # proves the function trusts the caller's total_rows instead of
+    # recomputing it when one is given.
+    dataset_info = dataset_info_from_lazy(lf, csv_path, total_rows=999)
+
+    assert dataset_info.row_count == 999

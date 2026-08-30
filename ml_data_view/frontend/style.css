@@ -18,16 +18,94 @@
 body {
   font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
   margin: 0;
-  padding: 20px 28px 48px;
+  padding: 0;
   color: var(--text-primary);
   background: var(--surface-2);
 }
 
-header {
+#top-strip {
   display: flex;
   align-items: center;
   gap: 14px;
-  margin-bottom: 20px;
+  padding: 16px 28px;
+  background: var(--surface-1);
+  border-bottom: 1px solid var(--border);
+}
+
+/* Classification banner's top-strip slot. Empty (and takes no visible
+   space) when the banner is disabled — pushed to the strip's far edge so
+   when it IS filled it reads as a status, not an action. */
+#classification-banner-slot {
+  margin-left: auto;
+}
+
+.classification-banner-chip {
+  display: inline-block;
+  padding: 4px 14px;
+  border-radius: 6px;
+  font-size: 0.82rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+/* Matches #top-strip's own treatment (padding/border), just pinned to the
+   bottom of the content instead of the top — same banner, same weight,
+   the other edge of the window. */
+#bottom-strip {
+  padding: 10px 28px;
+  text-align: center;
+  font-size: 0.82rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  border-top: 1px solid var(--border);
+}
+
+#app-shell {
+  display: flex;
+  align-items: flex-start;
+  min-height: 0;
+}
+
+#app-nav {
+  display: flex;
+  flex-direction: column;
+  flex: 0 0 180px;
+  gap: 2px;
+  padding: 20px 12px;
+  position: sticky;
+  top: 0;
+}
+
+.nav-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 9px 14px;
+  font: inherit;
+  font-size: 0.88rem;
+  font-weight: 500;
+  color: var(--text-secondary);
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.nav-item:hover {
+  background: var(--surface-1);
+  color: var(--text-primary);
+}
+
+.nav-item.active {
+  background: var(--surface-1);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+#app-content {
+  flex: 1;
+  min-width: 0;
+  padding: 20px 28px 48px 0;
 }
 
 h1 {
@@ -36,7 +114,7 @@ h1 {
   margin: 0;
 }
 
-#open-file-btn {
+.btn-primary {
   padding: 8px 18px;
   font-size: 0.9rem;
   font-weight: 500;
@@ -47,9 +125,9 @@ h1 {
   cursor: pointer;
 }
 
-#open-file-btn:hover { background: var(--accent-hover); }
+.btn-primary:hover { background: var(--accent-hover); }
 
-#open-file-btn:disabled {
+.btn-primary:disabled {
   background: var(--text-muted);
   border-color: var(--text-muted);
   cursor: default;
@@ -86,13 +164,58 @@ h1 {
 
 .hidden { display: none !important; }
 
+/* Determinate progress + stop, shown only for folder loads. */
+#load-progress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+#load-progress-bar {
+  width: 160px;
+  height: 8px;
+}
+
+#load-progress-pct {
+  font-variant-numeric: tabular-nums; /* stop the % jittering as it counts */
+  min-width: 3ch;
+  color: var(--text-secondary);
+}
+
+.btn-stop {
+  background: transparent;
+  color: var(--error-text);
+  border: 1px solid var(--error-border);
+  border-radius: 4px;
+  padding: 2px 10px;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+.btn-stop:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+/* Partial-results banner. Styled as a warning rather than an error: the
+   data shown is correct, just incomplete. */
+#partial-banner {
+  background: var(--warning-bg, #fff6e5);
+  color: var(--warning-text, #7a4b00);
+  border: 1px solid var(--warning-border, #e8c07a);
+  padding: 10px 14px;
+  border-radius: 6px;
+  margin: 16px 28px 0;
+  font-size: 0.9rem;
+}
+
 #error-banner {
   background: var(--error-bg);
   color: var(--error-text);
   border: 1px solid var(--error-border);
   padding: 10px 14px;
   border-radius: 6px;
-  margin-bottom: 20px;
+  margin: 16px 28px 0;
   font-size: 0.9rem;
 }
 
@@ -122,6 +245,14 @@ h2 {
   font-weight: 600;
   margin: 0 0 12px;
   color: var(--text-primary);
+}
+
+/* Distinguishes a page-level heading (one per nav section) from an h2 used
+   inside a panel (e.g. "Schema", "Preview") — same tag, a bit more presence
+   since it's naming the whole page, not a card within it. */
+.section-heading {
+  font-size: 1.2rem;
+  margin: 4px 0 16px;
 }
 
 h3 {
@@ -256,3 +387,494 @@ th {
   width: 100%;
   height: 320px;
 }
+
+.settings-field {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-bottom: 14px;
+  max-width: 420px;
+}
+
+.settings-field:last-child {
+  margin-bottom: 0;
+}
+
+.settings-field input[type="text"] {
+  width: 100%;
+  font: inherit;
+  font-weight: 400;
+  color: var(--text-primary);
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 7px 10px;
+}
+
+.settings-field input[type="color"] {
+  width: 60px;
+  height: 32px;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-1);
+  cursor: pointer;
+}
+
+.settings-field-checkbox {
+  flex-direction: row;
+  align-items: center;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.settings-field-checkbox input[type="checkbox"] {
+  width: 15px;
+  height: 15px;
+  cursor: pointer;
+}
+
+#reports-section-checkboxes {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 4px 0 16px;
+}
+
+#reports-section-checkboxes .settings-field-checkbox {
+  margin-bottom: 0;
+}
+
+#reports-result {
+  margin: 12px 0 0;
+  word-break: break-all;
+}
+
+.settings-static-value {
+  font-weight: 400;
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  word-break: break-all;
+}
+
+.truncated-cell {
+  cursor: pointer;
+  text-decoration: underline dotted var(--text-muted);
+  text-underline-offset: 2px;
+}
+
+.truncated-cell:hover {
+  color: var(--accent);
+}
+
+.image-preview-card {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 12px 14px;
+  background: var(--surface-1);
+  margin-bottom: 14px;
+}
+
+.image-preview-card:last-child {
+  margin-bottom: 0;
+}
+
+.image-thumbnail-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, 100px);
+  gap: 8px;
+}
+
+.image-thumbnail-cell {
+  width: 100px;
+  height: 100px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  overflow: hidden;
+  background: var(--surface-2);
+}
+
+.image-thumbnail-cell img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  cursor: pointer;
+  display: block;
+}
+
+.image-thumbnail-cell.thumbnail-broken {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  font-size: 0.7rem;
+  text-align: center;
+  padding: 4px;
+}
+
+.modal {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+
+.modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+}
+
+.modal-content {
+  position: relative;
+  max-width: min(800px, 90vw);
+  max-height: 85vh;
+  overflow: auto;
+  background: var(--surface-1);
+  border-radius: var(--radius);
+  padding: 20px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+}
+
+.modal-close {
+  position: absolute;
+  top: 8px;
+  right: 10px;
+  border: none;
+  background: none;
+  font-size: 1.3rem;
+  line-height: 1;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 4px;
+}
+
+.modal-close:hover {
+  color: var(--text-primary);
+}
+
+.modal-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 0.9rem;
+  line-height: 1.5;
+  margin: 8px 0 0;
+  padding-right: 16px;
+}
+
+.modal-image {
+  display: block;
+  max-width: 100%;
+  max-height: 75vh;
+  margin: 8px auto 0;
+}
+
+/* Folder-loading group chooser (Stage 2), rendered into the shared
+   #detail-modal via app.js's chooseFolderGroup(). */
+.folder-group-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  margin-bottom: 8px;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+.folder-group-option:has(input:checked) {
+  border-color: var(--accent);
+  background: var(--surface-2);
+}
+
+.folder-group-option input[type="radio"] {
+  margin-top: 3px;
+  cursor: pointer;
+}
+
+.folder-excluded-list {
+  max-height: 160px;
+  overflow-y: auto;
+  margin: 6px 0 0;
+  padding-left: 20px;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
+.folder-excluded-list li {
+  margin-bottom: 4px;
+  word-break: break-all;
+}
+
+.folder-modal-actions {
+  margin-top: 16px;
+}
+
+/* Correlated missingness list (Distributions tab). One row per detected
+   group — a short factual line, not a chart: the finding is "these columns
+   share a null pattern", which a plot would only obscure. */
+.correlated-group {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  margin-bottom: 8px;
+  background: var(--panel-bg, #ffffff);
+}
+
+.correlated-group-columns {
+  font-weight: 600;
+  font-family: var(--mono-font, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 0.85rem;
+}
+
+.correlated-group-detail {
+  color: var(--text-secondary);
+  font-size: 0.8rem;
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+}
+
+/* --- Row search ------------------------------------------------------ */
+
+.search-condition {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+
+.search-condition select,
+.search-condition input[type="text"] {
+  font: inherit;
+  font-size: 0.85rem;
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--surface-1);
+  color: var(--text-primary);
+}
+
+.search-condition .cond-column { min-width: 190px; }
+.search-condition .cond-operator { min-width: 110px; }
+.search-condition .cond-value { width: 150px; }
+
+/* The offending condition is marked in place, so a bad value points at the
+   row that caused it rather than failing the whole search. */
+.search-condition.has-error select,
+.search-condition.has-error input[type="text"] {
+  border-color: var(--error-border);
+}
+
+.cond-error {
+  color: var(--error-text);
+  font-size: 0.78rem;
+  flex-basis: 100%;
+}
+
+.btn-remove {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  font-size: 1.05rem;
+  line-height: 1;
+  padding: 2px 6px;
+  cursor: pointer;
+}
+
+.btn-remove:hover { color: var(--error-text); }
+
+.btn-secondary {
+  padding: 6px 14px;
+  font-size: 0.85rem;
+  font-weight: 500;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-1);
+  color: var(--text-primary);
+  cursor: pointer;
+}
+
+.btn-secondary:hover { background: var(--surface-2); }
+
+.search-actions {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  margin: 12px 0;
+}
+
+#search-columns-details {
+  margin: 10px 0;
+  font-size: 0.85rem;
+}
+
+#search-columns-details summary {
+  cursor: pointer;
+  color: var(--text-secondary);
+}
+
+.search-columns {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 4px 12px;
+  margin-top: 8px;
+  max-height: 220px;
+  overflow-y: auto;
+  font-size: 0.82rem;
+}
+
+.search-saved {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+
+.search-saved input[type="text"] {
+  font: inherit;
+  font-size: 0.85rem;
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+}
+
+.saved-search-list {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.saved-search-chip {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 1px 4px 1px 10px;
+  background: var(--surface-2);
+}
+
+.saved-search-run {
+  background: transparent;
+  border: none;
+  font: inherit;
+  font-size: 0.8rem;
+  color: var(--accent);
+  cursor: pointer;
+  padding: 3px 2px;
+}
+
+.search-results-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+#search-results-wrapper {
+  max-height: 520px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+#search-results-table {
+  border-collapse: collapse;
+  width: 100%;
+}
+
+/* --- Dataset comparison ---------------------------------------------- */
+
+.compare-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+
+.compare-sample-toggle {
+  font-size: 0.82rem;
+  color: var(--text-secondary);
+}
+
+.compare-progress {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.compare-progress progress { width: 220px; height: 8px; }
+#compare-progress-pct { font-variant-numeric: tabular-nums; color: var(--text-secondary); font-size: 0.85rem; }
+
+.schema-diff-block {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+.schema-diff-title {
+  font-size: 0.82rem;
+  color: var(--text-secondary);
+  margin-right: 4px;
+}
+
+.schema-chip {
+  display: inline-block;
+  padding: 2px 9px;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  font-family: var(--mono-font, ui-monospace, SFMono-Regular, Menlo, monospace);
+  border: 1px solid var(--border);
+}
+
+/* Added / removed / retyped read as three distinct states, not a severity
+   ramp — none of them is "worse" than the others. */
+.schema-chip-added { background: #eaf6ee; border-color: #b7dfc4; color: #1d5c33; }
+.schema-chip-removed { background: var(--error-bg); border-color: var(--error-border); color: var(--error-text); }
+.schema-chip-retyped { background: #fff6e5; border-color: #e8c07a; color: #7a4b00; }
+
+#compare-results-wrapper {
+  max-height: 560px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+#compare-results-table { border-collapse: collapse; width: 100%; }
+
+/* Severity is carried by an explicit labelled badge, not by color alone —
+   the label is readable without color vision. The row tint is a secondary
+   cue only. */
+.compare-significant { background: #fdf1f0; }
+.compare-moderate { background: #fffaf0; }
+
+.severity-badge {
+  display: inline-block;
+  padding: 1px 9px;
+  border-radius: 999px;
+  font-size: 0.74rem;
+  font-weight: 600;
+  border: 1px solid transparent;
+}
+
+.severity-stable { background: var(--surface-2); color: var(--text-muted); border-color: var(--border); }
+.severity-moderate { background: #fff6e5; color: #7a4b00; border-color: #e8c07a; }
+.severity-significant { background: var(--error-bg); color: var(--error-text); border-color: var(--error-border); }

@@ -6,74 +6,304 @@
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
-  <header>
+  <header id="top-strip">
     <h1>ML Dataset Profiler</h1>
-    <button id="open-file-btn">Open File…</button>
+    <button id="open-file-btn" class="btn-primary">Open File…</button>
+    <button id="open-folder-btn" class="btn-primary">Open Folder…</button>
     <span id="file-path"></span>
     <span id="loading-indicator" class="hidden" aria-live="polite">
       <span class="spinner"></span>
       <span id="loading-message">Loading…</span>
+      <!-- Determinate progress for folder loads (a 250-file folder takes
+           ~108s). Hidden for single-file opens, which are fast enough that
+           the spinner alone is honest. -->
+      <span id="load-progress" class="hidden">
+        <progress id="load-progress-bar" max="100" value="0"></progress>
+        <span id="load-progress-pct"></span>
+        <button type="button" id="stop-load-btn" class="btn-stop">Stop</button>
+      </span>
     </span>
+    <!-- Filled by renderClassificationBanner() (app.js) when Settings'
+         classification banner is enabled; empty and inert otherwise. -->
+    <div id="classification-banner-slot"></div>
   </header>
 
   <section id="error-banner" class="hidden"></section>
 
-  <section id="summary" class="panel hidden">
-    <div><strong>Rows:</strong> <span id="row-count"></span></div>
-    <div><strong>File size:</strong> <span id="file-size"></span></div>
-  </section>
+  <!-- Shown after a STOPPED folder load. Deliberately persistent (not a
+       toast): every number on screen describes a subset of the folder,
+       and a dismissed-and-forgotten notice is exactly how a partial
+       figure ends up quoted as a real one. -->
+  <section id="partial-banner" class="hidden" role="status"></section>
 
-  <section id="schema-section" class="panel hidden">
-    <h2>Schema</h2>
-    <table id="schema-table">
-      <thead>
-        <tr><th>Column</th><th>Type</th><th>Null count</th></tr>
-      </thead>
-      <tbody></tbody>
-    </table>
-  </section>
+  <div id="app-shell">
+    <nav id="app-nav">
+      <button type="button" class="nav-item active" data-section="overview">Overview</button>
+      <button type="button" class="nav-item" data-section="distributions">Distributions</button>
+      <button type="button" class="nav-item" data-section="embeddings">Embeddings</button>
+      <button type="button" class="nav-item" data-section="media">Media</button>
+      <button type="button" class="nav-item" data-section="search">Search</button>
+      <button type="button" class="nav-item" data-section="compare">Compare</button>
+      <button type="button" class="nav-item" data-section="reports">Reports</button>
+      <button type="button" class="nav-item" data-section="settings">Settings</button>
+    </nav>
 
-  <section id="preview-section" class="panel hidden">
-    <h2>Preview (first 50 rows)</h2>
-    <div id="preview-wrapper">
-      <table id="preview-table">
-        <thead></thead>
-        <tbody></tbody>
-      </table>
+    <main id="app-content">
+      <section id="section-overview" class="app-section">
+        <section id="summary" class="panel hidden">
+          <div><strong>Rows:</strong> <span id="row-count"></span></div>
+          <div><strong>File size:</strong> <span id="file-size"></span></div>
+          <!-- Folder loads only (source_type "folder") — hidden for a
+               single opened file. -->
+          <div id="summary-file-count-row" class="hidden">
+            <strong>Files:</strong> <span id="summary-file-count"></span>
+          </div>
+        </section>
+
+        <section id="schema-section" class="panel hidden">
+          <h2>Schema</h2>
+          <table id="schema-table">
+            <thead>
+              <tr><th>Column</th><th>Type</th><th>Null count</th></tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </section>
+
+        <section id="preview-section" class="panel hidden">
+          <h2>Preview (first 50 rows)</h2>
+          <div id="preview-wrapper">
+            <table id="preview-table">
+              <thead></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+
+      <section id="section-distributions" class="app-section hidden">
+        <h2 class="section-heading">Distributions</h2>
+        <div id="distributions-charts" class="panel chart-content hidden">
+          <!-- Hidden unless null_patterns.py confirms columns whose nulls
+               land on the same rows; filled by renderCorrelatedMissingness(). -->
+          <div class="chart-subsection hidden" id="correlated-missingness-section">
+            <h3>Correlated missingness</h3>
+            <p class="chart-note">
+              These columns go missing on the same rows, which usually points to one
+              upstream cause rather than independent gaps.
+            </p>
+            <div id="correlated-missingness-list"></div>
+          </div>
+
+          <div class="chart-subsection" id="null-heatmap-section">
+            <h3>Missing-value heatmap</h3>
+            <p id="null-heatmap-note" class="chart-note"></p>
+            <div id="null-heatmap-chart" class="chart-plot"></div>
+          </div>
+
+          <div class="chart-subsection" id="numeric-histograms-section">
+            <h3>Numeric distributions</h3>
+            <div id="numeric-histograms" class="chart-grid"></div>
+          </div>
+
+          <div class="chart-subsection" id="categorical-bars-section">
+            <h3>Class balance</h3>
+            <div id="categorical-bars" class="chart-grid"></div>
+          </div>
+
+          <div class="chart-subsection" id="text-length-histograms-section">
+            <h3>Text length distributions</h3>
+            <div id="text-length-histograms" class="chart-grid"></div>
+          </div>
+        </div>
+      </section>
+
+      <section id="section-embeddings" class="app-section hidden">
+        <h2 class="section-heading">Embeddings</h2>
+        <div id="embeddings-charts" class="panel chart-content hidden">
+          <div class="chart-subsection" id="embedding-projections-section">
+            <h3>Embedding projections (PCA)</h3>
+            <div id="embedding-projections"></div>
+          </div>
+        </div>
+      </section>
+
+      <section id="section-media" class="app-section hidden">
+        <h2 class="section-heading">Media</h2>
+        <div id="media-previews" class="panel chart-content hidden">
+          <div class="chart-subsection" id="image-previews-section">
+            <h3>Image previews</h3>
+            <div id="image-previews"></div>
+          </div>
+        </div>
+      </section>
+
+      <section id="section-search" class="app-section hidden">
+        <h2 class="section-heading">Search</h2>
+        <div class="panel">
+          <p class="chart-note">
+            Find rows by building your own conditions. All conditions must match.
+            Uniqueness is whatever you define it to be — e.g. an ID column plus a
+            RecKey column to isolate a single track.
+          </p>
+
+          <div id="search-conditions"></div>
+          <div class="search-actions">
+            <button type="button" id="add-condition-btn" class="btn-secondary">+ Add condition</button>
+            <button type="button" id="run-search-btn" class="btn-primary">Search</button>
+          </div>
+
+          <details id="search-columns-details">
+            <summary>Columns to display</summary>
+            <p class="chart-note">
+              Showing fewer columns is also faster — only the selected columns are
+              read from disk.
+            </p>
+            <div id="search-columns" class="search-columns"></div>
+          </details>
+
+          <div class="search-saved">
+            <input type="text" id="saved-search-name" placeholder="Name this search…" />
+            <button type="button" id="save-search-btn" class="btn-secondary">Save</button>
+            <div id="saved-search-list" class="saved-search-list"></div>
+          </div>
+        </div>
+
+        <div id="search-results-panel" class="panel hidden">
+          <div class="search-results-head">
+            <span id="search-count-line" class="chart-note"></span>
+            <button type="button" id="export-search-btn" class="btn-secondary">Export CSV…</button>
+          </div>
+          <div id="search-results-wrapper">
+            <table id="search-results-table">
+              <thead id="search-results-head"></thead>
+              <tbody id="search-results-body"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <section id="section-compare" class="app-section hidden">
+        <h2 class="section-heading">Compare</h2>
+        <div class="panel">
+          <p class="chart-note">
+            Compare the loaded dataset against another file or folder. Columns are
+            scored with PSI (Population Stability Index), the standard drift metric:
+            under 0.1 is stable, 0.1–0.25 moderate, above 0.25 significant.
+          </p>
+          <div class="compare-actions">
+            <button type="button" id="compare-folder-btn" class="btn-primary">Compare against folder…</button>
+            <button type="button" id="compare-file-btn" class="btn-secondary">Compare against file…</button>
+            <label class="compare-sample-toggle">
+              <input type="checkbox" id="compare-all-files" />
+              Compare all files (slower)
+            </label>
+          </div>
+          <p id="compare-status" class="chart-note"></p>
+          <div id="compare-progress" class="hidden compare-progress">
+            <progress id="compare-progress-bar" max="100" value="0"></progress>
+            <span id="compare-progress-pct"></span>
+            <button type="button" id="compare-stop-btn" class="btn-stop">Stop</button>
+          </div>
+        </div>
+
+        <div id="compare-schema-panel" class="panel hidden">
+          <h3>Schema differences</h3>
+          <div id="compare-schema-body"></div>
+        </div>
+
+        <div id="compare-results-panel" class="panel hidden">
+          <h3>Column differences</h3>
+          <p class="chart-note">Largest change first.</p>
+          <div id="compare-results-wrapper">
+            <table id="compare-results-table">
+              <thead>
+                <tr>
+                  <th>Column</th><th>A</th><th>B</th><th>Nulls A</th><th>Nulls B</th><th>PSI</th><th>Change</th>
+                </tr>
+              </thead>
+              <tbody id="compare-results-body"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <section id="section-reports" class="app-section hidden">
+        <h2 class="section-heading">Reports</h2>
+
+        <div id="reports-empty-state" class="panel">
+          <p class="chart-note">Open a file to generate a report.</p>
+        </div>
+
+        <div id="reports-panel" class="panel hidden">
+          <h2>PDF export</h2>
+          <p class="chart-note">
+            Choose which sections to include, then save a PDF wherever you like.
+          </p>
+          <div id="reports-section-checkboxes"></div>
+          <button id="generate-report-btn" class="btn-primary">Generate PDF Report</button>
+          <p id="reports-result" class="chart-note hidden"></p>
+        </div>
+      </section>
+
+      <section id="section-settings" class="app-section hidden">
+        <h2 class="section-heading">Settings</h2>
+
+        <div class="panel">
+          <h2>Classification banner</h2>
+          <p class="chart-note">
+            Marks every screen with a label of your choosing — e.g. a
+            sensitivity level your organization uses. Shown at the top and
+            bottom of the window while enabled.
+          </p>
+          <label class="settings-field settings-field-checkbox">
+            <input type="checkbox" id="settings-banner-enabled" />
+            Enable classification banner
+          </label>
+          <label class="settings-field">
+            Label
+            <input type="text" id="settings-banner-label" placeholder="e.g. INTERNAL USE ONLY" />
+          </label>
+          <label class="settings-field">
+            Banner color
+            <input type="color" id="settings-banner-color" />
+          </label>
+        </div>
+
+        <div class="panel">
+          <h2>Audit log</h2>
+          <p class="chart-note">
+            Records who opened which file and when. Written to a local file
+            only — nothing here is ever sent over the network.
+          </p>
+          <label class="settings-field settings-field-checkbox">
+            <input type="checkbox" id="settings-audit-enabled" />
+            Enable audit log
+          </label>
+          <div class="settings-field">
+            Log file
+            <span id="settings-audit-log-path" class="settings-static-value"></span>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <footer id="bottom-strip" class="hidden"></footer>
+
+  <div id="detail-modal" class="modal hidden">
+    <div class="modal-backdrop"></div>
+    <div class="modal-content">
+      <button id="modal-close-btn" class="modal-close" aria-label="Close">&times;</button>
+      <div id="modal-body"></div>
     </div>
-  </section>
-
-  <section id="charts-section" class="panel hidden">
-    <h2>Charts</h2>
-
-    <div class="chart-subsection" id="null-heatmap-section">
-      <h3>Missing-value heatmap</h3>
-      <p id="null-heatmap-note" class="chart-note"></p>
-      <div id="null-heatmap-chart" class="chart-plot"></div>
-    </div>
-
-    <div class="chart-subsection" id="numeric-histograms-section">
-      <h3>Numeric distributions</h3>
-      <div id="numeric-histograms" class="chart-grid"></div>
-    </div>
-
-    <div class="chart-subsection" id="categorical-bars-section">
-      <h3>Class balance</h3>
-      <div id="categorical-bars" class="chart-grid"></div>
-    </div>
-
-    <div class="chart-subsection" id="text-length-histograms-section">
-      <h3>Text length distributions</h3>
-      <div id="text-length-histograms" class="chart-grid"></div>
-    </div>
-
-    <div class="chart-subsection" id="embedding-projections-section">
-      <h3>Embedding projections (PCA)</h3>
-      <div id="embedding-projections"></div>
-    </div>
-  </section>
+  </div>
 
   <script src="plotly.min.js"></script>
   <script src="app.js"></script>
+  <!-- After app.js: search.js uses its showError/clearError/LOAD_POLL_MS,
+       and app.js's renderDataset() calls resetSearchForDataset() at runtime. -->
+  <script src="search.js"></script>
+  <script src="compare.js"></script>
 </body>
 </html>
