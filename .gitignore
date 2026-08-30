@@ -4,3 +4,10 @@ __pycache__/
 .pytest_cache/
 *.egg-info/
 sample_data/
+
+# Temporary checkpoint log from the folder-open OOM crash investigation
+# (ml_data_view/checkpoint_log.py) — not meant to be committed.
+folder_open_diagnostics.log
+
+# Local test dataset (~13GB of real Criteo parquet). Never commit data.
+criteo/
