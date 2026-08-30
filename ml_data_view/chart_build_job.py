@@ -33,12 +33,14 @@ class ChartBuildJob:
         dataset_dir: Path | None = None,
         null_counts: dict[str, int] | None = None,
         files: list[Path] | None = None,
+        predicate=None,
     ) -> None:
         self._lf = lf
         self._total_rows = total_rows
         self._dataset_dir = dataset_dir
         self._null_counts = null_counts
         self._files = files
+        self._predicate = predicate
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
         self._done = threading.Event()
@@ -82,6 +84,7 @@ class ChartBuildJob:
                 dataset_dir=self._dataset_dir,
                 null_counts=self._null_counts,
                 files=self._files,
+                predicate=self._predicate,
                 on_progress=lambda fraction, label: self._update(
                     stage="building", fraction=round(fraction, 4), label=label
                 ),

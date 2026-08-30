@@ -68,6 +68,18 @@ NUMERIC_DTYPE_NAMES = {
 STRING_DTYPE_NAMES = {"String", "Utf8"}
 
 
+def _scan_filtered(file: Path, predicate: pl.Expr | None) -> pl.LazyFrame:
+    """Scan one file, applying the active chart filter if there is one.
+
+    Every per-file scan in this module routes through here rather than
+    calling pl.scan_parquet directly, so a filter cannot end up applied in
+    some chart computations and silently forgotten in others — which would
+    put numbers describing different row sets on the same screen.
+    """
+    scan = pl.scan_parquet(file)
+    return scan.filter(predicate) if predicate is not None else scan
+
+
 def _is_missing(value: Any) -> bool:
     """True for None or float NaN.
 
@@ -81,7 +93,12 @@ def _is_missing(value: Any) -> bool:
     return isinstance(value, float) and value != value  # NaN is the only value != itself
 
 
-def classify_column(lf: pl.LazyFrame, column: str, files: list[Path] | None = None) -> str:
+def classify_column(
+    lf: pl.LazyFrame,
+    column: str,
+    files: list[Path] | None = None,
+    predicate: pl.Expr | None = None,
+) -> str:
     """Classify a column for charting purposes.
 
     Returns "numeric", "categorical", "text", or "unsupported" (no chart
@@ -93,11 +110,14 @@ def classify_column(lf: pl.LazyFrame, column: str, files: list[Path] | None = No
     makes that aggregation run per file rather than over the concat —
     required for folders, see _classify_string_column.
     """
-    return classify_column_with_cardinality(lf, column, files=files)[0]
+    return classify_column_with_cardinality(lf, column, files=files, predicate=predicate)[0]
 
 
 def classify_column_with_cardinality(
-    lf: pl.LazyFrame, column: str, files: list[Path] | None = None
+    lf: pl.LazyFrame,
+    column: str,
+    files: list[Path] | None = None,
+    predicate: pl.Expr | None = None,
 ) -> tuple[str, int | None]:
     """classify_column(), plus the distinct-value estimate it already had
     to compute. Returned together so build_chart_payload can choose between
@@ -109,11 +129,13 @@ def classify_column_with_cardinality(
     if dtype_name == "Boolean":
         return "categorical", 2
     if dtype_name in STRING_DTYPE_NAMES:
-        return _classify_string_column(lf, column, files=files)
+        return _classify_string_column(lf, column, files=files, predicate=predicate)
     return "unsupported", None
 
 
-def _classify_string_column_per_file(files: list[Path], column: str) -> tuple[str, int]:
+def _classify_string_column_per_file(
+    files: list[Path], column: str, predicate: pl.Expr | None = None
+) -> tuple[str, int]:
     """Categorical-vs-text from per-file distinct/row ratios, never
     querying the multi-file concat.
 
@@ -143,7 +165,7 @@ def _classify_string_column_per_file(files: list[Path], column: str) -> tuple[st
 
     for file in files:
         result = (
-            pl.scan_parquet(file)
+            _scan_filtered(file, predicate)
             .select(non_null.count().alias("n"), non_null.approx_n_unique().alias("nu"))
             .collect(engine="streaming")
         )
@@ -169,7 +191,10 @@ def _classify_string_column_per_file(files: list[Path], column: str) -> tuple[st
 
 
 def _classify_string_column(
-    lf: pl.LazyFrame, column: str, files: list[Path] | None = None
+    lf: pl.LazyFrame,
+    column: str,
+    files: list[Path] | None = None,
+    predicate: pl.Expr | None = None,
 ) -> tuple[str, int]:
     # approx_n_unique (HyperLogLog), not n_unique: an exact distinct count
     # builds a hash set of every distinct value, which on a large
@@ -186,7 +211,7 @@ def _classify_string_column(
     # against the thresholds below, which is already a heuristic.
     non_null = pl.col(column).drop_nulls()
     if files:
-        return _classify_string_column_per_file(files, column)
+        return _classify_string_column_per_file(files, column, predicate)
     result = lf.select(
         non_null.count().alias("n"), non_null.approx_n_unique().alias("nu")
     ).collect(engine="streaming")
@@ -257,7 +282,9 @@ def _is_skewed(minimum: float, maximum: float, p25: float, p75: float) -> bool:
     return (value_range / spread) >= SKEW_RANGE_TO_SPREAD_RATIO
 
 
-def _numeric_stats_per_file(files: list[Path], column: str) -> tuple[int, float, float, float, float] | None:
+def _numeric_stats_per_file(
+    files: list[Path], column: str, predicate: pl.Expr | None = None
+) -> tuple[int, float, float, float, float] | None:
     """(count, min, max, p25, p75) across `files`, one file at a time.
 
     min/max/count combine exactly. The quantiles are a row-weighted mean of
@@ -275,7 +302,7 @@ def _numeric_stats_per_file(files: list[Path], column: str) -> tuple[int, float,
 
     for file in files:
         result = (
-            pl.scan_parquet(file)
+            _scan_filtered(file, predicate)
             .select(
                 clean.count().alias("n"),
                 clean.min().alias("mn"),
@@ -299,7 +326,9 @@ def _numeric_stats_per_file(files: list[Path], column: str) -> tuple[int, float,
     return total, minimum, maximum, weighted_p25 / total, weighted_p75 / total
 
 
-def _histogram_per_file(files: list[Path], expr: pl.Expr, edges: list[float]) -> list[int]:
+def _histogram_per_file(
+    files: list[Path], expr: pl.Expr, edges: list[float], predicate: pl.Expr | None = None
+) -> list[int]:
     """Histogram over `files` against FIXED bin edges, summed.
 
     Fixed edges are what make this exact: each file is binned identically,
@@ -310,7 +339,7 @@ def _histogram_per_file(files: list[Path], expr: pl.Expr, edges: list[float]) ->
     totals = [0] * (len(edges) - 1)
     for file in files:
         result = (
-            pl.scan_parquet(file)
+            _scan_filtered(file, predicate)
             .select(expr.hist(bins=edges, include_breakpoint=False).alias("__h"))
             .collect(engine="streaming")
         )
@@ -321,9 +350,9 @@ def _histogram_per_file(files: list[Path], expr: pl.Expr, edges: list[float]) ->
 
 
 def _numeric_histogram_per_file(
-    files: list[Path], column: str, bins: int
+    files: list[Path], column: str, bins: int, predicate: pl.Expr | None = None
 ) -> dict[str, Any]:
-    stats = _numeric_stats_per_file(files, column)
+    stats = _numeric_stats_per_file(files, column, predicate)
     if stats is None:
         return {"column": column, "bin_edges": [], "counts": [], "x_scale": "linear"}
     _total, minimum, maximum, p25, p75 = stats
@@ -342,14 +371,14 @@ def _numeric_histogram_per_file(
         return {
             "column": column,
             "bin_edges": edges,
-            "counts": _histogram_per_file(files, clean, edges),
+            "counts": _histogram_per_file(files, clean, edges, predicate),
             "x_scale": "linear",
         }
 
     offset = -minimum if minimum < 0 else 0.0
     low, high = math.log1p(minimum + offset), math.log1p(maximum + offset)
     log_edges = [low + (high - low) * i / bins for i in range(bins + 1)]
-    counts = _histogram_per_file(files, (clean + offset).log1p(), log_edges)
+    counts = _histogram_per_file(files, (clean + offset).log1p(), log_edges, predicate)
     return {
         "column": column,
         "bin_edges": [math.expm1(edge) - offset for edge in log_edges],
@@ -359,7 +388,11 @@ def _numeric_histogram_per_file(
 
 
 def numeric_histogram_data(
-    lf: pl.LazyFrame, column: str, bins: int = NUMERIC_HISTOGRAM_BINS, files: list[Path] | None = None
+    lf: pl.LazyFrame,
+    column: str,
+    bins: int = NUMERIC_HISTOGRAM_BINS,
+    files: list[Path] | None = None,
+    predicate: pl.Expr | None = None,
 ) -> dict[str, Any]:
     """Equal-width histogram over a numeric column, computed lazily via
     polars' native streaming Expr.hist() (Rust-vectorized) rather than
@@ -385,7 +418,7 @@ def numeric_histogram_data(
     frame instead grows ~28-42MB per file (measured repeatedly).
     """
     if files:
-        return _numeric_histogram_per_file(files, column, bins)
+        return _numeric_histogram_per_file(files, column, bins, predicate)
     clean = _clean_numeric_expr(column)
     stats = lf.select(
         clean.count().alias("__n"),
@@ -413,7 +446,9 @@ def numeric_histogram_data(
     return {"column": column, "bin_edges": bin_edges, "counts": counts, "x_scale": "log"}
 
 
-def _categorical_bar_per_file(files: list[Path], column: str, top_n: int) -> dict[str, Any]:
+def _categorical_bar_per_file(
+    files: list[Path], column: str, top_n: int, predicate: pl.Expr | None = None
+) -> dict[str, Any]:
     """Top-N categories without ever holding every distinct value at once.
 
     The single-frame path below materializes the full value_counts table.
@@ -431,7 +466,7 @@ def _categorical_bar_per_file(files: list[Path], column: str, top_n: int) -> dic
     merged: dict[str, int] = {}
     total = 0
     for file in files:
-        scan = pl.scan_parquet(file).select(column).drop_nulls()
+        scan = _scan_filtered(file, predicate).select(column).drop_nulls()
         total += int(scan.select(pl.len()).collect(engine="streaming")[0, 0])
         top = (
             scan.group_by(column)
@@ -455,10 +490,14 @@ def _categorical_bar_per_file(files: list[Path], column: str, top_n: int) -> dic
 
 
 def categorical_bar_data(
-    lf: pl.LazyFrame, column: str, top_n: int = TOP_N_CATEGORIES, files: list[Path] | None = None
+    lf: pl.LazyFrame,
+    column: str,
+    top_n: int = TOP_N_CATEGORIES,
+    files: list[Path] | None = None,
+    predicate: pl.Expr | None = None,
 ) -> dict[str, Any]:
     if files:
-        return _categorical_bar_per_file(files, column, top_n)
+        return _categorical_bar_per_file(files, column, top_n, predicate)
     non_null = pl.col(column).drop_nulls()
     result = lf.select(non_null.value_counts(sort=True).alias("__vc")).collect(engine="streaming")
     value_counts = result.unnest("__vc")
@@ -475,7 +514,10 @@ def categorical_bar_data(
 
 
 def value_frequency_histogram_data(
-    lf: pl.LazyFrame, column: str, files: list[Path] | None = None
+    lf: pl.LazyFrame,
+    column: str,
+    files: list[Path] | None = None,
+    predicate: pl.Expr | None = None,
 ) -> dict[str, Any]:
     """How many times each distinct value occurs, bucketed.
 
@@ -497,7 +539,7 @@ def value_frequency_histogram_data(
     distribution left; `per_file` is returned so the UI can say so.
     """
     sources: list[pl.LazyFrame] = (
-        [pl.scan_parquet(file) for file in files] if files else [lf]
+        [_scan_filtered(file, predicate) for file in files] if files else [lf]
     )
     totals = dict.fromkeys(VALUE_FREQUENCY_LABELS, 0)
 
@@ -623,6 +665,7 @@ def build_chart_payload(
     null_counts: dict[str, int] | None = None,
     files: list[Path] | None = None,
     on_progress: Callable[[float, str], None] | None = None,
+    predicate: pl.Expr | None = None,
 ) -> dict[str, Any]:
     """Compute every Phase 1+2+3 chart's data for the given LazyFrame.
 
@@ -637,6 +680,11 @@ def build_chart_payload(
     columns are still detected but their thumbnails come back empty.
     """
     schema = lf.collect_schema()
+    # The filter is applied to the frame here AND passed to every per-file
+    # helper below, because the two take different routes to the data: the
+    # per-file helpers re-scan each file themselves and never see this frame.
+    if predicate is not None:
+        lf = lf.filter(predicate)
     # Progress is reported over the per-column loop plus the four
     # whole-dataset steps that follow it, so the fraction advances
     # smoothly instead of stalling at the end. Measured at ~0.54s per
@@ -658,19 +706,25 @@ def build_chart_payload(
 
     for index, column in enumerate(schema):
         report(f"Charting columns — {index + 1} of {len(schema)}")
-        chart_type, cardinality = classify_column_with_cardinality(lf, column, files=files)
+        chart_type, cardinality = classify_column_with_cardinality(
+            lf, column, files=files, predicate=predicate
+        )
         if chart_type == "numeric":
-            numeric_histograms.append(numeric_histogram_data(lf, column, files=files))
+            numeric_histograms.append(
+                numeric_histogram_data(lf, column, files=files, predicate=predicate)
+            )
         elif chart_type == "categorical":
             # Too many distinct values for a top-N bar to say anything (an
             # ID-like column: track IDs, hashes). Chart the SHAPE of how
             # often values recur instead of naming ten arbitrary ones.
             if cardinality is not None and cardinality > CATEGORICAL_BAR_MAX_DISTINCT:
                 value_frequency_histograms.append(
-                    value_frequency_histogram_data(lf, column, files=files)
+                    value_frequency_histogram_data(lf, column, files=files, predicate=predicate)
                 )
             else:
-                categorical_bars.append(categorical_bar_data(lf, column, files=files))
+                categorical_bars.append(
+                    categorical_bar_data(lf, column, files=files, predicate=predicate)
+                )
                 categorical_columns.append(column)
         elif chart_type == "text":
             text_length_histograms.append(text_length_histogram_data(lf, column))
@@ -719,7 +773,9 @@ def build_chart_payload(
         # caller didn't precompute it, and 0 trips correlated_missingness's
         # empty-dataset guard, silently disabling the whole feature.
         rows = total_rows if total_rows is not None else row_count(lf)
-        correlated = correlated_missingness(lf, null_counts, rows, files=files)
+        correlated = correlated_missingness(
+            lf, null_counts, rows, files=files, predicate=predicate
+        )
 
     completed += 1
     report(_TRAILING_STEPS[3])

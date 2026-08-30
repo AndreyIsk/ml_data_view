@@ -211,6 +211,21 @@ User-built row search over a loaded file or folder (search.py, search\_jobs.py, 
 \- Deliberately not built (see the spec): charts do not follow the filter, no result sorting (it would require collecting every match before showing the first row, destroying the early exit), and no OR/nested condition groups.
 
 
+\## Charts follow the search filter (done)
+
+Applying a search filter makes EVERY derived figure describe only matching rows — charts, row count, null counts and preview alike — so no two numbers on screen ever describe different row sets.
+
+\- Explicit action ("Use this filter for charts"), not automatic: a search returns in milliseconds while a chart rebuild takes minutes on a large folder, so filtering must not start that work on every search.
+
+\- Correctness trap handled: parquet footer null counts describe the WHOLE file and are invalid under a filter, so the filtered path decodes instead. Demonstrated on 10 real files — filtering integer\_feature\_1 >= 100 excludes nulls by definition, giving a filtered null count of 0 where the footer would have reported 1,561,097.
+
+\- Every per-file scan in chart\_data.py routes through \_scan\_filtered(), so a filter cannot end up applied in some chart computations and forgotten in others.
+
+\- A persistent, non-dismissible banner states the active filter until cleared — same reasoning as the partial-load banner. Opening a new dataset clears the filter on both sides.
+
+\- Filtered builds are faster in practice (6.8s vs 11.6s on 10 real files) since a selective filter leaves far less data to aggregate, even though it forfeits the metadata shortcut.
+
+
 \## Dataset comparison (done)
 
 Compare the loaded dataset against another file or folder and flag what changed (compare.py, compare\_jobs.py, frontend/compare.js). Design spec: docs/superpowers/specs/2026-08-30-dataset-comparison-design.md.

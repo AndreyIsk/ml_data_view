@@ -28,6 +28,10 @@ SUPPORTED_EXTENSIONS = {".parquet", ".arrow", ".csv"}
 # (see _bounded_parquet_missing_counts). This — not the row-group size —
 # is what caps peak memory for that step.
 BATCH_ROWS = 65_536
+# Per-column aggregations per query on the filtered path. Same reasoning as
+# null_patterns.MAX_EXPRS_PER_QUERY: many aggregations over one scan is what
+# blew memory on wide multi-file data.
+_FILTERED_EXPRS_PER_QUERY = 8
 
 
 class UnsupportedFileTypeError(ValueError):
@@ -236,12 +240,40 @@ def _bounded_parquet_missing_counts(
     return totals
 
 
+def _filtered_null_counts(
+    files: list[Path], schema: pl.Schema, predicate: pl.Expr
+) -> dict[str, int]:
+    """Missing-value counts over only the rows matching `predicate`.
+
+    A filter invalidates BOTH shortcuts the unfiltered path relies on:
+    parquet footer null counts describe the whole file, and the pyarrow
+    batch decode has no notion of a polars predicate. So this goes through
+    polars per file, batching the per-column aggregations — many
+    aggregations over one scan is the pattern that repeatedly exhausted
+    memory on wide data, and a filter does not make that safe, only
+    smaller.
+    """
+    totals = dict.fromkeys(schema, 0)
+    names = list(schema)
+    for file in files:
+        scan = _dispatch_scanner(Path(file), Path(file).suffix.lower()).filter(predicate)
+        for start in range(0, len(names), _FILTERED_EXPRS_PER_QUERY):
+            batch = names[start : start + _FILTERED_EXPRS_PER_QUERY]
+            result = scan.select(
+                [_null_count_expr(name, schema[name]) for name in batch]
+            ).collect(engine="streaming")
+            for name in batch:
+                totals[name] += int(result[0, name])
+    return totals
+
+
 def _null_counts(
     lf: pl.LazyFrame,
     schema: pl.Schema,
     files: list[Path] | None = None,
     on_file: Callable[[int, Path], None] | None = None,
     should_cancel: Callable[[], bool] | None = None,
+    predicate: pl.Expr | None = None,
 ) -> dict[str, int]:
     """Every column's null count.
 
@@ -260,6 +292,13 @@ def _null_counts(
     """
     if not schema:
         return {}
+
+    if predicate is not None:
+        if not files:
+            exprs = [_null_count_expr(name, dtype) for name, dtype in schema.items()]
+            decoded = lf.filter(predicate).select(exprs).collect(engine="streaming")
+            return {name: int(decoded[0, name]) for name in schema}
+        return _filtered_null_counts([Path(f) for f in files], schema, predicate)
 
     parquet_files = [Path(f) for f in files] if files else []
     use_metadata = bool(files) and all(f.suffix.lower() == ".parquet" for f in parquet_files)
@@ -329,6 +368,7 @@ def dataset_info_from_lazy(
     file_size_bytes: int | None = None,
     files: list[Path] | None = None,
     null_counts: dict[str, int] | None = None,
+    predicate: pl.Expr | None = None,
 ) -> DatasetInfo:
     """Build a DatasetInfo from a LazyFrame and its source path.
 
@@ -352,6 +392,12 @@ def dataset_info_from_lazy(
     """
     path = Path(path)
     schema = lf.collect_schema()
+    # `predicate` makes every number below describe only matching rows —
+    # row count, null counts and the preview alike. Applied to the frame
+    # rather than to each call site so nothing can accidentally mix
+    # filtered and unfiltered figures on one screen.
+    if predicate is not None:
+        lf = lf.filter(predicate)
     if total_rows is None:
         total_rows = row_count(lf)
     source_files = files if files is not None else ([path] if path.is_file() else None)
@@ -359,7 +405,7 @@ def dataset_info_from_lazy(
     # has it — the cancellable folder loader computes it incrementally so
     # it can report progress, and must not have it recomputed here.
     if null_counts is None:
-        null_counts = _null_counts(lf, schema, files=source_files)
+        null_counts = _null_counts(lf, schema, files=source_files, predicate=predicate)
 
     columns = [
         ColumnInfo(name=name, dtype=str(dtype), null_count=null_counts[name])

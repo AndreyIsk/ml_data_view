@@ -119,6 +119,13 @@ class Api:
         # never describe a different query than the rows on screen.
         self._search_predicate = None
         self._search_columns: list[str] | None = None
+        self._search_conditions: list[dict[str, Any]] = []
+        # When set, EVERY derived figure describes only matching rows —
+        # charts, row count, null counts and preview alike. Kept separate
+        # from _search_predicate so running a new search does not silently
+        # change what the charts already on screen describe.
+        self._chart_filter = None
+        self._chart_filter_conditions: list[dict[str, Any]] = []
         self._match_count_job: SearchCountJob | None = None
         self._search_export_job: SearchExportJob | None = None
         # The in-flight dataset comparison, if any (start_comparison).
@@ -185,6 +192,9 @@ class Api:
         self._current_lazy = lf
         self._current_path = path
         self._current_dataset_dir = Path(path).parent
+        self._chart_filter = None  # a new dataset never inherits a filter
+        self._chart_filter_conditions = []
+        self._search_predicate = None
         self._current_row_count = row_count(lf)  # one streaming count, shared below
         self._chart_data = None  # stale for the newly loaded dataset — get_chart_data() refills it
 
@@ -262,6 +272,7 @@ class Api:
             dataset_dir=self._dataset_dir(),
             null_counts=null_counts or None,
             files=self._current_files or None,
+            predicate=self._chart_filter,
         )
         self._chart_build_adopted = False
         self._chart_build_job.start()
@@ -334,6 +345,7 @@ class Api:
             return {"error": str(exc), "condition_index": exc.condition_index}
 
         self._search_predicate = predicate
+        self._search_conditions = list(conditions or [])
         self._search_columns = list(columns) if columns else None
         rows = search_rows(
             self._search_sources(), predicate, columns=self._search_columns, limit=limit
@@ -406,6 +418,59 @@ class Api:
             return {"error": "No export in progress."}
         self._search_export_job.cancel()
         return {"cancelled": True}
+
+    def apply_chart_filter(self) -> dict[str, Any]:
+        """Make every derived figure describe only the current search's rows.
+
+        Deliberately an explicit action rather than something run_search()
+        triggers: a search returns in milliseconds, while rebuilding charts
+        takes minutes on a large folder, so filtering must not silently
+        start that work on every keystroke.
+
+        Recomputes dataset info (row count, null counts, preview) here and
+        returns it; the frontend then restarts the chart build, which picks
+        the same predicate up from _chart_filter.
+        """
+        if self._search_predicate is None:
+            return {"error": "Run a search first."}
+        self._chart_filter = self._search_predicate
+        self._chart_filter_conditions = list(self._search_conditions)
+        return self._rebuild_dataset_info()
+
+    def clear_chart_filter(self) -> dict[str, Any]:
+        """Drop the filter so everything describes the whole dataset again."""
+        self._chart_filter = None
+        self._chart_filter_conditions = []
+        return self._rebuild_dataset_info()
+
+    def _rebuild_dataset_info(self) -> dict[str, Any]:
+        lf = self._current_lazy
+        files = self._current_files or (
+            [Path(self._current_path)] if self._current_path else None
+        )
+        info = dataset_info_from_lazy(
+            lf,
+            self._current_path,
+            files=files,
+            predicate=self._chart_filter,
+            file_size_bytes=self._dataset_info.get("file_size_bytes")
+            if self._dataset_info
+            else None,
+        )
+        self._dataset_info = info.to_dict()
+        self._current_row_count = info.row_count
+        self._chart_data = None  # stale under a different filter
+        payload = info.to_dict()
+        payload["filter_active"] = self._chart_filter is not None
+        payload["filter_conditions"] = self._chart_filter_conditions
+        payload["source_type"] = "folder" if self._current_files else "file"
+        return payload
+
+    def get_chart_filter(self) -> dict[str, Any]:
+        return {
+            "filter_active": self._chart_filter is not None,
+            "filter_conditions": self._chart_filter_conditions,
+        }
 
     def list_saved_searches(self) -> list[dict[str, Any]]:
         return list(self._settings.saved_searches)
@@ -668,6 +733,9 @@ class Api:
         self._current_dataset_dir = Path(self._folder_path)
         self._current_row_count = result["row_count"]
         self._current_files = list(job.used_files)
+        self._chart_filter = None  # a new dataset never inherits a filter
+        self._chart_filter_conditions = []
+        self._search_predicate = None
         self._dataset_info = result
         self._chart_data = None  # stale for the newly loaded dataset
 

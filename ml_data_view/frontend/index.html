@@ -36,6 +36,13 @@
        figure ends up quoted as a real one. -->
   <section id="partial-banner" class="hidden" role="status"></section>
 
+  <!-- Shown whenever charts/counts describe a filtered subset. Persistent
+       and not dismissible, for the same reason as the partial banner. -->
+  <section id="filter-banner" class="hidden" role="status">
+    <span id="filter-banner-text"></span>
+    <button type="button" id="clear-filter-btn" class="btn-secondary">Show all rows</button>
+  </section>
+
   <div id="app-shell">
     <nav id="app-nav">
       <button type="button" class="nav-item active" data-section="overview">Overview</button>
@@ -172,6 +179,7 @@
         <div id="search-results-panel" class="panel hidden">
           <div class="search-results-head">
             <span id="search-count-line" class="chart-note"></span>
+            <button type="button" id="apply-filter-btn" class="btn-secondary">Use this filter for charts</button>
             <button type="button" id="export-search-btn" class="btn-secondary">Export CSV…</button>
           </div>
           <div id="search-results-wrapper">

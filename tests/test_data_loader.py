@@ -328,3 +328,56 @@ def test_dataset_info_from_lazy_reuses_a_precomputed_total_rows(tmp_path):
     dataset_info = dataset_info_from_lazy(lf, csv_path, total_rows=999)
 
     assert dataset_info.row_count == 999
+
+
+# --- filtered profiles (charts following a search filter) ---
+
+
+def test_null_counts_under_a_filter_describe_only_matching_rows(tmp_path):
+    """Parquet footer null counts describe the WHOLE file, so they are
+    invalid once a filter is applied — this pins that the filtered path is
+    used instead of the metadata shortcut."""
+    path = tmp_path / "f.parquet"
+    pl.DataFrame(
+        {"keep": [1, 1, 0, 0], "v": [None, 5.0, None, None]}
+    ).write_parquet(path)
+
+    counts = data_loader_module._null_counts(
+        pl.scan_parquet(path),
+        pl.scan_parquet(path).collect_schema(),
+        files=[path],
+        predicate=pl.col("keep") == 1,
+    )
+
+    assert counts["v"] == 1  # only the matching rows, not the file's 3
+    assert counts["keep"] == 0
+
+
+def test_null_counts_under_a_filter_sum_across_files(tmp_path):
+    files = []
+    for i in range(3):
+        path = tmp_path / f"p{i}.parquet"
+        pl.DataFrame({"keep": [1, 0], "v": [None, None]}).write_parquet(path)
+        files.append(path)
+
+    counts = data_loader_module._null_counts(
+        pl.scan_parquet(files[0]),
+        pl.scan_parquet(files[0]).collect_schema(),
+        files=files,
+        predicate=pl.col("keep") == 1,
+    )
+
+    assert counts["v"] == 3  # one matching null row per file
+
+
+def test_dataset_info_under_a_filter_reports_filtered_rows_and_nulls(tmp_path):
+    path = tmp_path / "d.parquet"
+    pl.DataFrame({"keep": [1, 1, 0], "v": [None, 2.0, None]}).write_parquet(path)
+
+    info = dataset_info_from_lazy(
+        pl.scan_parquet(path), path, files=[path], predicate=pl.col("keep") == 1
+    )
+
+    assert info.row_count == 2
+    assert {c.name: c.null_count for c in info.columns}["v"] == 1
+    assert len(info.preview_rows) == 2  # preview shows matching rows only

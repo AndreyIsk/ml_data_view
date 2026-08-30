@@ -71,7 +71,11 @@ def _candidate_groups(null_counts: dict[str, int], total_rows: int) -> list[list
 
 
 def _co_null_counts(
-    lf: pl.LazyFrame, anchor: str, others: list[str], files: list[Path] | None
+    lf: pl.LazyFrame,
+    anchor: str,
+    others: list[str],
+    files: list[Path] | None,
+    predicate: pl.Expr | None = None,
 ) -> dict[str, int]:
     """Rows where `anchor` and each of `others` are BOTH null.
 
@@ -84,6 +88,8 @@ def _co_null_counts(
     anchor_null = pl.col(anchor).is_null()
     totals = dict.fromkeys(others, 0)
     sources = [pl.scan_parquet(file) for file in files] if files else [lf]
+    if predicate is not None:
+        sources = [source.filter(predicate) for source in sources]
 
     for source in sources:
         for start in range(0, len(others), MAX_EXPRS_PER_QUERY):
@@ -101,6 +107,7 @@ def _verify_group(
     group: list[str],
     null_counts: dict[str, int],
     files: list[Path] | None = None,
+    predicate: pl.Expr | None = None,
 ) -> dict[str, Any] | None:
     """Pass 2: confirm the candidates really are null on the same rows.
 
@@ -111,7 +118,7 @@ def _verify_group(
     contained inside one with many.
     """
     anchor, others = group[0], group[1:]
-    co_null = _co_null_counts(lf, anchor, others, files)
+    co_null = _co_null_counts(lf, anchor, others, files, predicate)
 
     confirmed = [anchor]
     overlaps = []
@@ -138,6 +145,7 @@ def correlated_missingness(
     null_counts: dict[str, int],
     total_rows: int,
     files: list[Path] | None = None,
+    predicate: pl.Expr | None = None,
 ) -> list[dict[str, Any]]:
     """Groups of 2+ columns whose nulls co-occur near-perfectly.
 
@@ -148,7 +156,7 @@ def correlated_missingness(
         return []
     groups = []
     for candidate in _candidate_groups(null_counts, total_rows):
-        verified = _verify_group(lf, candidate, null_counts, files=files)
+        verified = _verify_group(lf, candidate, null_counts, files=files, predicate=predicate)
         if verified is not None:
             groups.append(verified)
     return groups

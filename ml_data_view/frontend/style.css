@@ -878,3 +878,20 @@ th {
 .severity-stable { background: var(--surface-2); color: var(--text-muted); border-color: var(--border); }
 .severity-moderate { background: #fff6e5; color: #7a4b00; border-color: #e8c07a; }
 .severity-significant { background: var(--error-bg); color: var(--error-text); border-color: var(--error-border); }
+
+/* Active-filter banner. Same persistent treatment as #partial-banner: both
+   exist so a number describing a subset is never read as describing all. */
+#filter-banner {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  background: #eaf2fb;
+  color: #14406f;
+  border: 1px solid #b9d3ee;
+  padding: 10px 14px;
+  border-radius: 6px;
+  margin: 16px 28px 0;
+  font-size: 0.9rem;
+}
+
+#filter-banner-text { flex: 1; }

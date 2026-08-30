@@ -750,3 +750,79 @@ def test_comparison_against_a_single_file(tmp_path):
     assert started["files_b"] == 1
     state = api.wait_for_comparison(timeout=120)
     assert state["error"] is None
+
+
+def _api_with_folder_at(tmp_path, folder):
+    api = Api(settings_dir=tmp_path)
+    api.discover_folder(str(folder))
+    api.start_folder_load(0)
+    api.wait_for_folder_load(timeout=60)
+    return api
+
+
+# --- charts following the search filter ---
+
+
+def test_apply_chart_filter_makes_every_figure_describe_matching_rows(tmp_path):
+    folder = _searchable_folder(tmp_path, files=2, rows=30)
+    api = _api_with_folder_at(tmp_path, folder)
+    api.run_search([{"column": "track_id", "operator": "is", "values": ["T-1"]}])
+
+    filtered = api.apply_chart_filter()
+
+    assert filtered["filter_active"] is True
+    assert filtered["row_count"] == 20  # 10 per file x 2 files, not 60
+    api.start_chart_build()
+    state = api.wait_for_chart_build(timeout=120)
+    total = sum(state["result"]["categorical_bars"][0]["counts"])
+    assert total == 20  # charts describe the filtered rows too
+
+
+def test_clearing_the_filter_restores_the_whole_dataset(tmp_path):
+    folder = _searchable_folder(tmp_path, files=2, rows=30)
+    api = _api_with_folder_at(tmp_path, folder)
+    api.run_search([{"column": "track_id", "operator": "is", "values": ["T-1"]}])
+    api.apply_chart_filter()
+
+    restored = api.clear_chart_filter()
+
+    assert restored["filter_active"] is False
+    assert restored["row_count"] == 60
+
+
+def test_apply_chart_filter_requires_a_search(tmp_path):
+    folder = _searchable_folder(tmp_path, files=1)
+    api = _api_with_folder_at(tmp_path, folder)
+    assert "error" in api.apply_chart_filter()
+
+
+def test_null_counts_follow_the_filter(tmp_path):
+    """Footer null counts describe whole files, so a filtered dataset info
+    must not report them."""
+    folder = tmp_path / "nulls"
+    folder.mkdir()
+    pl.DataFrame(
+        {"keep": [1, 1, 0, 0], "v": [None, 5.0, None, None]}
+    ).write_parquet(folder / "p0.parquet")
+    api = _api_with_folder_at(tmp_path, folder)
+    api.run_search([{"column": "keep", "operator": "is", "values": ["1"]}])
+
+    filtered = api.apply_chart_filter()
+
+    assert {c["name"]: c["null_count"] for c in filtered["columns"]}["v"] == 1
+
+
+def test_loading_a_new_dataset_clears_any_active_filter(tmp_path):
+    """A filter belonging to a previous dataset must never silently apply
+    to the next one."""
+    folder = _searchable_folder(tmp_path, files=1)
+    api = _api_with_folder_at(tmp_path, folder)
+    api.run_search([{"column": "track_id", "operator": "is", "values": ["T-1"]}])
+    api.apply_chart_filter()
+    assert api.get_chart_filter()["filter_active"] is True
+
+    other = tmp_path / "other.parquet"
+    pl.DataFrame({"track_id": ["T-9"], "height": [1.0]}).write_parquet(other)
+    api.load_file(str(other))
+
+    assert api.get_chart_filter()["filter_active"] is False

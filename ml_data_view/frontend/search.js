@@ -317,6 +317,10 @@ async function handleSaveSearch() {
 // that picked a different schema group.
 function resetSearchForDataset(columns) {
   searchSchema = columns.map((c) => ({ name: c.name, dtype: c.dtype }));
+  // A newly opened dataset never inherits the previous one's filter
+  // (the backend clears it too), so the banner must not linger.
+  const banner = document.getElementById("filter-banner");
+  if (banner) banner.classList.add("hidden");
   document.getElementById("search-conditions").innerHTML = "";
   document.getElementById("search-results-panel").classList.add("hidden");
   document.getElementById("search-count-line").textContent = "";
@@ -329,3 +333,83 @@ document.getElementById("add-condition-btn").addEventListener("click", () => add
 document.getElementById("run-search-btn").addEventListener("click", handleRunSearch);
 document.getElementById("export-search-btn").addEventListener("click", handleExportSearch);
 document.getElementById("save-search-btn").addEventListener("click", handleSaveSearch);
+
+// --- Applying the search as a filter for everything else ----------------
+//
+// Deliberately an explicit button rather than something a search triggers
+// on its own: a search returns in milliseconds, while rebuilding charts
+// takes minutes on a large folder. Once applied, EVERY derived figure
+// follows it — charts, row count, null counts, preview — so a persistent
+// banner states it until cleared, the same reasoning as the partial-load
+// banner.
+
+function describeFilter(conditions) {
+  if (!conditions || conditions.length === 0) return "a filter";
+  return conditions
+    .map((c) => `${c.column} ${c.operator}${(c.values || []).length ? " " + c.values.join(" and ") : ""}`)
+    .join(" and ");
+}
+
+function renderFilterBanner(info) {
+  const banner = document.getElementById("filter-banner");
+  if (!info || !info.filter_active) {
+    banner.classList.add("hidden");
+    return;
+  }
+  document.getElementById("filter-banner-text").textContent =
+    `Showing ${Number(info.row_count).toLocaleString()} rows matching ` +
+    `${describeFilter(info.filter_conditions)}. Every chart and count below ` +
+    `describes only these rows.`;
+  banner.classList.remove("hidden");
+}
+
+// Re-renders the dataset (schema, preview, counts) from a filtered or
+// unfiltered dataset-info payload, then rebuilds charts to match. Charts
+// must follow: leaving stale whole-dataset charts beside a filtered row
+// count is exactly the mismatch the banner exists to prevent.
+async function applyFilterState(info) {
+  if (info.error) {
+    showError(info.error);
+    return;
+  }
+  renderDataset(info);
+  renderFilterBanner(info);
+
+  showLoading("Recomputing charts…");
+  showProgress({ stoppable: false });
+  try {
+    const started = await window.pywebview.api.start_chart_build();
+    if (started.error) {
+      showError(started.error);
+      return;
+    }
+    const state = await pollChartBuild();
+    if (state.error) {
+      showError(state.error);
+      return;
+    }
+    if (state.result) await renderCharts(state.result);
+  } finally {
+    hideProgress();
+    hideLoading();
+    // renderDataset() resets the Search tab, which would wipe the banner.
+    renderFilterBanner(info);
+  }
+}
+
+async function handleApplyFilter() {
+  applyFilterBtn.disabled = true;
+  try {
+    await applyFilterState(await window.pywebview.api.apply_chart_filter());
+  } finally {
+    applyFilterBtn.disabled = false;
+  }
+}
+
+async function handleClearFilter() {
+  await applyFilterState(await window.pywebview.api.clear_chart_filter());
+}
+
+const applyFilterBtn = document.getElementById("apply-filter-btn");
+applyFilterBtn.addEventListener("click", handleApplyFilter);
+document.getElementById("clear-filter-btn").addEventListener("click", handleClearFilter);
