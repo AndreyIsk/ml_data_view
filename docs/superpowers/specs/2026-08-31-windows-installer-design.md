@@ -20,7 +20,8 @@ almost no wizard, and a shortcut that starts the app immediately.
 
 1. Switch the PyInstaller build from `onefile` to `onedir`.
 2. Add version and file metadata, which the project currently has none of.
-3. An Inno Setup installer, per-user, scripted and committed.
+3. An Inno Setup installer, per-user, scripted and committed, with the
+   full classic seven-screen wizard (destination picker included).
 4. One build command producing `Setup.exe`.
 5. A pre-flight browser check in the Reports tab.
 
@@ -111,16 +112,52 @@ per-machine deployment is the MSI follow-up, not a checkbox here.
 
 ### Wizard
 
-Deliberately minimal — three screens:
+The full classic seven-screen flow, the one commercial desktop software
+uses:
 
-1. Welcome
-2. A single checkbox: "Create a desktop shortcut" (unchecked by default)
-3. Progress, then Finish with a checked "Launch ML Dataset Profiler"
+1. **Welcome**
+2. **Select Destination Location** — defaults to
+   `%LOCALAPPDATA%\Programs\MLDatasetProfiler`, with a Browse button and
+   the usual required/available disk-space line
+3. **Select Start Menu Folder** — defaults to `ML Dataset Profiler`, with
+   a "don't create a Start Menu folder" option
+4. **Select Additional Tasks** — "Create a desktop shortcut", unchecked by
+   default
+5. **Ready to Install** — a summary of destination, Start Menu folder and
+   selected tasks, with Back still available
+6. **Installing** — progress
+7. **Finished** — "Launch ML Dataset Profiler", checked
 
-**No directory-selection page** (`DisableDirPage=yes`) and **no components
-page**. A per-user install has one sensible location and one set of files;
-offering choices that do not matter is what makes an installer feel
-bureaucratic rather than professional.
+No licence page. There is no EULA text in the repository, and a wizard
+page backed by placeholder text is worse than no page. Adding one later is
+`LicenseFile=installer\EULA.txt` plus the file — one line, no structural
+change.
+
+An earlier draft of this spec specified a three-screen wizard with no
+directory page, on the grounds that Claude Desktop (the reference the user
+named) has essentially no wizard at all. That was the wrong reading:
+Claude Desktop is a free consumer app that optimises for "running in five
+seconds", whereas this is bought, installed deliberately, and may need to
+go somewhere other than the system drive. The directory page is a real
+control here, not ceremony.
+
+### Destination page and per-user privileges
+
+The directory page and `PrivilegesRequired=lowest` interact in a way worth
+handling rather than discovering. Setup runs unelevated, so if the user
+browses to `C:\Program Files`, the install cannot write there.
+
+Inno's default behaviour is to fail partway through with a permissions
+error. Instead, a `NextButtonClick` check on the destination page tests
+whether the chosen directory is actually writable and, if not, says so
+immediately:
+
+> Setup cannot write to that folder. Choose a location inside your user
+> profile, or re-run Setup as an administrator to install for all users.
+
+Caught on the page where the choice was made, with the two ways out named.
+That is the difference between an installer that guides and one that
+merely refuses.
 
 ### Shortcuts and registry
 
@@ -207,8 +244,9 @@ cover only what can genuinely go wrong silently:
   resource, and the `.iss` `AppVersion` all agree.
 - **`.iss` invariants** — `PrivilegesRequired=lowest` (a regression here
   reintroduces the UAC prompt), `DefaultDirName` under `{localappdata}`,
-  a non-empty stable `AppId`, `DisableDirPage=yes`, and that the uninstall
-  section contains no reference to `%APPDATA%`.
+  a non-empty stable `AppId`, that the destination and Start Menu pages
+  are NOT disabled (the wizard is deliberately the full one), and that the
+  uninstall section contains no reference to `%APPDATA%`.
 - **The spec/`resource_path` coupling** already covered in
   `tests/test_resources.py` continues to apply unchanged under onedir.
 
