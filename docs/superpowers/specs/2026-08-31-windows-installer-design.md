@@ -11,10 +11,16 @@ customer would recognise as a real desktop application: one `Setup.exe`,
 a Start Menu entry, an Add/Remove Programs entry that actually uninstalls,
 and a launch that feels instant.
 
-The benchmark named by the user is Claude Desktop. What that pattern
-actually consists of on Windows — and what this spec adopts — is a
-per-user install to `%LOCALAPPDATA%\Programs`, no UAC prompt at any point,
-almost no wizard, and a shortcut that starts the app immediately.
+The benchmark named by the user is Claude Desktop. What this spec takes
+from that pattern is the *install mechanics*: per-user, to
+`%LOCALAPPDATA%\Programs`, with no UAC prompt at any point, and a launch
+that is instant.
+
+What it deliberately does NOT take is Claude Desktop's near-absent wizard.
+That suits a free consumer app optimising for "running in five seconds";
+this is software someone buys and installs deliberately, possibly onto a
+machine whose system drive is nearly full. It gets the full classic wizard,
+destination picker included — see "Wizard" below.
 
 ## Scope
 
