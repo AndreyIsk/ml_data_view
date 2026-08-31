@@ -303,6 +303,20 @@ A dark theme, chosen in Settings > Appearance as System / Light / Dark (`AppSett
 
 \- Deliberately NOT themed: the PDF report (printed and shared outside the app, so report\_charts.py keeps its own light palette) and the classification banner (its color is a deliberate choice for a security label, and app.js already picks contrasting text for it).
 
+\## App icon (done)
+
+An otter logo wired in as the app icon. Source art at assets/otter.png; scripts/make\_icons.py regenerates every derived file from it.
+
+\- assets/otter.ico bundles 16/32/48/64/128/256px frames in one file. Windows pulls a DIFFERENT frame from the same .ico for the title bar (16), taskbar (32), Alt-Tab (48) and Explorer's large tiles (256), so a single-size .ico looks resampled in most of those places. Each frame is resampled from the full 2048px source rather than from the previous step, so the 16px frame is a clean reduction of the original rather than a reduction of a reduction.
+
+\- ml\_data\_view/main.py passes it via `webview.start(icon=...)`. pywebview's own documentation says that parameter is "supported only on GTK and QT" — that is OUT OF DATE. The installed 6.2.1's winforms backend (platforms/winforms.py) reads the same `\_state['icon']` and assigns `self.Icon = Icon(path)`, falling back to extracting python.exe's icon when unset, which is why the window used to show a Python logo. Confirmed against a running window (WM\_GETICON returned the otter, and it renders in the title bar), not just by reading the source. .NET's System.Drawing.Icon only accepts .ico, so a PNG here would fail.
+
+\- assets/icons/otter-{16,32,48,128,256,512}.png is the same art as standalone PNGs for docs, a web page, or a non-Windows packaging target.
+
+\- NOTE ON THE SOURCE ART: assets/otter.png is actually a JPEG (RGB, no alpha) on a solid teal background, despite the .png extension. So every icon carries that teal square rather than a transparent cutout. Keying the teal out is not viable on this file — the fur edges and whiskers are antialiased against it and would fringe or vanish. A genuinely transparent source can be dropped in at the same path and `python scripts/make\_icons.py` re-run; nothing else needs to change.
+
+\- The .exe/installer icon is NOT wired up: that is packaging, which the roadmap puts in Phase 5. The .ico is the artifact PyInstaller will want when that phase starts.
+
 \## Explicit non-goals right now
 
 \- Do not touch the LLM custom-chart feature yet (that's Phase 4, and includes the LLM-config Settings UI still outstanding from Phase 6)
