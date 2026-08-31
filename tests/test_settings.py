@@ -1,5 +1,6 @@
 from ml_data_view.settings import (
     DEFAULT_BANNER_COLOR,
+    THEMES,
     AppSettings,
     load_settings,
     save_settings,
@@ -124,3 +125,33 @@ def test_an_unnamed_saved_search_is_rejected():
 
     with pytest.raises(ValueError):
         upsert_saved_search(AppSettings(), "   ", [], None)
+
+
+# --- theme ------------------------------------------------------------
+
+
+def test_theme_defaults_to_system(tmp_path):
+    """First launch should match the machine, not impose a choice nobody
+    made."""
+    assert load_settings(tmp_path).theme == "system"
+
+
+def test_theme_round_trips(tmp_path):
+    save_settings(AppSettings(theme="dark"), tmp_path)
+
+    assert load_settings(tmp_path).theme == "dark"
+
+
+def test_an_unrecognised_theme_falls_back_to_system(tmp_path):
+    """A hand-edited or future settings file must not leave the app with an
+    unresolvable theme — every other field already tolerates that."""
+    settings_file_path(tmp_path).parent.mkdir(parents=True, exist_ok=True)
+    settings_file_path(tmp_path).write_text('{"theme": "midnight"}', encoding="utf-8")
+
+    assert load_settings(tmp_path).theme == "system"
+
+
+def test_every_valid_theme_is_accepted(tmp_path):
+    for theme in THEMES:
+        save_settings(AppSettings(theme=theme), tmp_path)
+        assert load_settings(tmp_path).theme == theme

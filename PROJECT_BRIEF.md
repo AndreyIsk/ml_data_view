@@ -138,7 +138,7 @@ training dataset without writing pandas code every time.
 
 
 
-\## Current phase: PHASE 7 (Reports) — PDF export shipped, plus large-folder scaling and report refinements
+\## Current phase: PHASE 7 (Reports) — PDF export shipped, plus large-folder scaling, report refinements, the post-load stat line, the Findings tab and night mode
 
 Built:
 
@@ -246,6 +246,62 @@ Compare the loaded dataset against another file or folder and flag what changed 
 
 \- Refactor: BackgroundJob (the start/poll/cancel lifecycle shared by the polled jobs) moved from inside search\_jobs.py to its own module ml\_data\_view/background\_job.py when a fifth job class needed it. FolderLoadJob and ChartBuildJob predate it and still carry their own copies.
 
+
+\## Load performance stat line (done)
+
+One quiet line under the top strip after any successful load: "Profiled 195,800,000 rows across 250 files in 1m 53s — peak memory 1.9 GiB (process)". Surfaces in the app the same figures the measurements above were quoting by hand from diagnostic runs.
+
+\- Formatting lives in ml\_data\_view/load\_stats.py, not in JS: the backend hands the frontend a ready-made sentence. The omission rules are the point — any figure that is not known drops its whole clause rather than showing a zero or a guess, and when nothing is known there is no line at all. Duplicating that logic in the frontend is how the two would drift apart, so app.js only renders `load_stats.line`.
+
+\- Peak memory is psutil's `peak_wset` — the process high-water mark, which Windows offers no way to reset. So it is labelled "(process)" rather than presented as this load's own peak: after a 250-file folder, a small file opened next would otherwise appear to have used the folder's memory. Off Windows there is no equivalent reading wired up, and current RSS is NOT substituted (it would silently understate the peak) — the clause is dropped instead.
+
+\- Timing wraps the real load path at each of the three entry points: load\_file(), load\_folder\_group(), and FolderLoadJob.\_load() (so a folder load measures the worker thread's whole run, not the adoption that follows it). The audit-log write sits outside the clock.
+
+\- A stopped folder load reports the files actually used, not the folder's full count, so the stat line agrees with the partial banner instead of contradicting it.
+
+\- Styled as a measurement, not a banner: muted, small, no background or border. The banners below it carry warnings a user must act on, and giving a measurement equal visual weight would flatten that distinction.
+
+\- No data-layer change: every figure was already computed by the time a load finishes (row count from a streaming aggregation or parquet metadata, file count from the schema group), so this adds no read to the lazy/streaming path.
+
+\## Findings tab (done)
+
+A tab that answers "is anything wrong with this dataset?" instead of leaving the user to read every chart and infer it (findings.py, deep\_checks.py, findings\_job.py, frontend/findings.js). Design spec: docs/superpowers/specs/2026-08-31-findings-tab-design.md.
+
+\- Nine INSTANT checks are pure functions over two dicts the app has already computed — `Api.\_dataset\_info` and the chart payload. None takes a `pl.LazyFrame`, imports polars, or performs I/O. That is a design constraint, not an implementation detail: it makes the whole instant catalogue structurally incapable of violating the lazy/streaming rule, and lets every check be tested against a hand-built dict with no fixture file at all.
+
+\- The cost of that is paid in TIMING: instant checks cannot run until the chart build finishes, which on a 250-file folder is minutes. Until then the tab says "Waiting for chart data…" rather than showing a clean state — "nothing found" before anything looked is a lie at exactly the moment a user is most likely to trust it.
+
+\- Checks reuse decisions chart\_data.py already made rather than re-deriving them: a one-bin equal-edged histogram IS `numeric\_histogram\_data`'s "every value identical", and `x\_scale == "log"` IS `\_is\_skewed`'s verdict. Re-deriving either would create a second source of truth that could disagree with the chart on screen.
+
+\- Check precedence stops one problem being reported three times. An all-null column suppresses `high\_missingness` and `constant\_column` for that column; a constant column suppresses `class\_imbalance` (a single-value column is trivially "100% one class"). Without this, one dead column produced three findings and counted three times in the severity summary.
+
+\- Three DEEP checks read data and run only on an explicit button, as a cancellable job. Two are SAMPLED and say so in their own finding text: an exact duplicate count over the 195.8M-row folder means holding ~195M row hashes, the same unbounded-set pattern that exhausted a 2GB cap in categorical\_bar\_data. Duplicate detection also excludes Binary/List/Array columns from row identity — 100,000 rows of image blobs is not a bounded read — which changes what "duplicate" means, so the finding names the excluded columns rather than quietly redefining the term. `sentinel\_values` is EXACT, because counting equality against a fixed value set is a streaming aggregation that sums precisely per file.
+
+\- `unresolvable\_images` exists because the instant image check cannot do its job alone: `image\_previews\_data` records one null thumbnail for three different causes (null value, missing file, undecodable bytes). The instant check reports them together in those words; the deep check re-reads the values and separates them.
+
+\- The tab reads as a scan: `list\_checks()` is deliberately independent of a loaded dataset, so every check name is painted with a pending marker before any work happens. The deep checks' pending/running/done is REAL per-check status polled from DeepCheckJob. The instant checks' stagger is not — they take ~5ms total, so their reveal is an animation capped at 120ms per check, and the code says so rather than dressing 5ms up as a scan.
+
+\- Cancelling deep checks keeps completed ones (half a findings list is half an answer, like a stopped folder load); a check that never ran is marked "not run", never "passed". A check that raises becomes an explicit error row — a check that could not run is not a check that passed.
+
+\- Known limitation: `likely\_id\_column` reads `value\_frequency\_histograms`, which only exists for columns classified CATEGORICAL with over 200 distinct values. A mostly-unique short string (e.g. "t1729") classifies as `text` and gets a text-length histogram instead, so the check cannot see it. Widening it would need cardinality carried into the payload for text columns — a data-layer change, deliberately not made for a presentation feature.
+
+\## Night mode (done)
+
+A dark theme, chosen in Settings > Appearance as System / Light / Dark (`AppSettings.theme`, default "system").
+
+\- The change that made it tractable was collapsing TWO color sources into one. Chart colors used to be literals in app.js while the UI palette lived in style.css; a second palette would have made that four lists to keep in sync. Now every color is a role in style.css and app.js reads the chart ones back out with `themeColor()` AT DRAW TIME — which is also what makes a live theme switch possible at all. Same no-two-sources-of-truth rule the Findings checks follow by reusing chart\_data's verdicts.
+
+\- The dark column is SELECTED, not an inversion: each hue re-stepped for a dark ground from the dataviz skill's reference palette. The three scatter slots were run through that skill's validator with `--pairs all` against each mode's own surface — light worst CVD dE 9.2 / normal 24.0, dark 9.4 / 20.9, both clear of the >=8 and >=15 floors. tests/test\_theme.py pins those six hexes so a hue cannot be swapped without sending whoever did it back to the validator.
+
+\- "system" is resolved in JS via matchMedia rather than by a CSS media query, so the dark values are written in exactly one place and an explicit Light/Dark choice wins in both directions without a specificity fight. The OS listener only acts while the preference is "system" — an explicit choice is not overridden when the machine flips at sunset.
+
+\- A theme change re-renders charts from a cached `latestChartData`, never a rebuild: rebuilding costs ~0.54s per file (minutes on a big folder) while re-rendering already-fetched data is instant. Per-card "Color by" selections are captured and restored across that re-render.
+
+\- tests/test\_theme.py parses both palettes straight out of style.css and gates every text pair at WCAG AA 4.5:1 and every chart mark at 3:1. Three marks are exempt WITH their reasons recorded in NON\_TEXT\_EXEMPT (light aqua at 2.82:1 is a documented property of the validated palette, relieved by the legend; the "Missing" bucket is recessive by design, like a gridline) — an exemption is a visible decision, not a gap in coverage.
+
+\- That gate caught a PRE-EXISTING bug: white on `--accent` measures 4.37:1, under AA for .btn-primary's 0.9rem/500 text — every primary button in the app. `--accent` could not simply darken, since it is also `--chart-series` and validated categorical slot 1, so the roles split: `--accent-strong` (#1c5cab light) backs filled buttons at 6.8:1.
+
+\- Deliberately NOT themed: the PDF report (printed and shared outside the app, so report\_charts.py keeps its own light palette) and the classification banner (its color is a deliberate choice for a security label, and app.js already picks contrasting text for it).
 
 \## Explicit non-goals right now
 

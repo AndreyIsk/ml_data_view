@@ -1,18 +1,128 @@
 * { box-sizing: border-box; }
 
+/* Two palettes, one set of roles.
+ *
+ * Every color in this file is a role defined here — including the chart
+ * colors, which app.js reads back out via themeColor() at draw time. That
+ * is deliberate: before night mode, Plotly's colors were baked into
+ * constants in app.js while the UI's lived here, and a second palette
+ * would have made that four things to keep in sync. One source of truth,
+ * same rule the Findings checks follow by reusing chart_data's verdicts.
+ *
+ * The dark column is SELECTED, not an inversion: each hue is re-stepped
+ * for a dark ground (dataviz skill's reference palette, references/
+ * palette.md). tests/test_theme.py parses both blocks below and gates
+ * every text pair at WCAG AA and every chart mark at 3:1 — a muted ink
+ * that vanishes on dark fails there, not in someone's eyes at midnight.
+ */
 :root {
   --surface-1: #ffffff;
   --surface-2: #faf9f8;
+  --panel-bg: #ffffff;
   --text-primary: #1a1a1a;
   --text-secondary: #52514e;
-  --text-muted: #83827c;
+  --text-muted: #6f6e69;
   --border: #e2e1dc;
   --accent: #2a78d6;
   --accent-hover: #1c5cab;
+  /* Filled buttons get their OWN step, one darker than --accent. White on
+     --accent measures 4.37:1 — under AA for 0.9rem/500 text, which is what
+     .btn-primary is. --accent itself cannot simply be darkened: it is also
+     --chart-series and categorical slot 1, both validated at this exact
+     value. So the roles split rather than the color moving. */
+  --accent-strong: #1c5cab;
+  --accent-strong-hover: #184f95;
+  --on-accent: #ffffff;
   --error-bg: #fdecea;
   --error-border: #f5c6cb;
   --error-text: #611a15;
+  --warning-bg: #fff6e5;
+  --warning-border: #e8c07a;
+  --warning-text: #6b4200;
+  --success-bg: #eaf6ee;
+  --success-border: #b7dfc4;
+  --success-text: #1d5c33;
+  --info-bg: #eaf2fb;
+  --info-border: #b9d3ee;
+  --info-text: #14406f;
+  /* Row tints for the compare table: a wash behind a whole row, so body
+     text has to stay readable on top of them. */
+  --row-tint-strong: #fdf1f0;
+  --row-tint-soft: #fffaf0;
+
+  /* Chart roles — read by app.js's themeColor(), see the note above.
+     One accent for every single-series bar/histogram; a status ramp (never
+     a categorical hue) for the null heatmap, since it encodes how bad the
+     missingness is, not identity. */
+  --chart-series: #2a78d6;
+  --chart-missing: #d03b3b;
+  --chart-present: #f0efec;
+  --chart-gridline: #e2e1dc;
+  --chart-axis-text: #52514e;
+  /* Scatter slots 1-3. Only the first three validate colorblind-safety
+     across ALL pairs, which is why the backend caps color-by at three
+     (embedding_data.EMBEDDING_COLOR_TOP_N). */
+  --chart-cat-1: #2a78d6;
+  --chart-cat-2: #eb6834;
+  --chart-cat-3: #1baf7a;
+  --chart-other: #6f6e69;
+  --chart-missing-bucket: #a3a29a;
+  --chart-marker-ring: #ffffff;
+
   --radius: 8px;
+}
+
+/* Dark. Stamped on <html> by app.js, which resolves the "system" setting
+   through matchMedia rather than duplicating the palette in a media query
+   — one place the dark values are written, and the Settings override wins
+   in both directions by construction. */
+[data-theme="dark"] {
+  --surface-1: #1a1a19;
+  --surface-2: #0d0d0d;
+  --panel-bg: #1a1a19;
+  --text-primary: #ffffff;
+  --text-secondary: #c3c2b7;
+  --text-muted: #a3a29a;
+  --border: #383835;
+  --accent: #3987e5;
+  --accent-hover: #5598e7;
+  /* On dark the accent is light enough to take dark ink, so the button
+     keeps the accent hue rather than darkening away from it. */
+  --accent-strong: #3987e5;
+  --accent-strong-hover: #5598e7;
+  --on-accent: #0d0d0d;
+  --error-bg: #3a1c1c;
+  --error-border: #7a2f2f;
+  --error-text: #f3b8b8;
+  --warning-bg: #33280f;
+  --warning-border: #7a5f1f;
+  --warning-text: #f0ca7a;
+  --success-bg: #143020;
+  --success-border: #2f5c3c;
+  --success-text: #96d9ab;
+  --info-bg: #13253a;
+  --info-border: #2b4f74;
+  --info-text: #a8cdf0;
+  --row-tint-strong: #2a1a1a;
+  --row-tint-soft: #2a2416;
+
+  --chart-series: #3987e5;
+  /* Status critical is mode-invariant by design — a severity color that
+     changed with the theme would be a different claim in each. */
+  --chart-missing: #d03b3b;
+  --chart-present: #383835;
+  --chart-gridline: #2c2c2a;
+  --chart-axis-text: #c3c2b7;
+  --chart-cat-1: #3987e5;
+  --chart-cat-2: #d95926;
+  --chart-cat-3: #199e70;
+  /* Other/Missing swap luminance roles across the flip. On white the
+     recessive neutral is the LIGHTER one; on dark it is the darker one.
+     Keeping the light values here would make "Missing" the brightest
+     thing in the plot. */
+  --chart-other: #c3c2b7;
+  --chart-missing-bucket: #86857e;
+  --chart-marker-ring: #1a1a19;
 }
 
 body {
@@ -118,14 +228,17 @@ h1 {
   padding: 8px 18px;
   font-size: 0.9rem;
   font-weight: 500;
-  border: 1px solid var(--accent);
+  border: 1px solid var(--accent-strong);
   border-radius: 6px;
-  background: var(--accent);
-  color: #fff;
+  background: var(--accent-strong);
+  color: var(--on-accent);
   cursor: pointer;
 }
 
-.btn-primary:hover { background: var(--accent-hover); }
+.btn-primary:hover {
+  background: var(--accent-strong-hover);
+  border-color: var(--accent-strong-hover);
+}
 
 .btn-primary:disabled {
   background: var(--text-muted);
@@ -197,12 +310,23 @@ h1 {
   cursor: default;
 }
 
+/* Post-load stat line. Deliberately NOT a banner: no background, no
+   border, no radius — the banners below it carry warnings a user must act
+   on, and giving a measurement the same visual weight would flatten that
+   distinction. Muted, small, and it simply sits under the strip. */
+#load-stats {
+  margin: 10px 28px 0;
+  color: var(--text-muted);
+  font-size: 0.82rem;
+  font-variant-numeric: tabular-nums;
+}
+
 /* Partial-results banner. Styled as a warning rather than an error: the
    data shown is correct, just incomplete. */
 #partial-banner {
-  background: var(--warning-bg, #fff6e5);
-  color: var(--warning-text, #7a4b00);
-  border: 1px solid var(--warning-border, #e8c07a);
+  background: var(--warning-bg);
+  color: var(--warning-text);
+  border: 1px solid var(--warning-border);
   padding: 10px 14px;
   border-radius: 6px;
   margin: 16px 28px 0;
@@ -628,7 +752,7 @@ th {
   border: 1px solid var(--border);
   border-radius: 6px;
   margin-bottom: 8px;
-  background: var(--panel-bg, #ffffff);
+  background: var(--panel-bg);
 }
 
 .correlated-group-columns {
@@ -847,9 +971,9 @@ th {
 
 /* Added / removed / retyped read as three distinct states, not a severity
    ramp — none of them is "worse" than the others. */
-.schema-chip-added { background: #eaf6ee; border-color: #b7dfc4; color: #1d5c33; }
+.schema-chip-added { background: var(--success-bg); border-color: var(--success-border); color: var(--success-text); }
 .schema-chip-removed { background: var(--error-bg); border-color: var(--error-border); color: var(--error-text); }
-.schema-chip-retyped { background: #fff6e5; border-color: #e8c07a; color: #7a4b00; }
+.schema-chip-retyped { background: var(--warning-bg); border-color: var(--warning-border); color: var(--warning-text); }
 
 #compare-results-wrapper {
   max-height: 560px;
@@ -863,8 +987,8 @@ th {
 /* Severity is carried by an explicit labelled badge, not by color alone —
    the label is readable without color vision. The row tint is a secondary
    cue only. */
-.compare-significant { background: #fdf1f0; }
-.compare-moderate { background: #fffaf0; }
+.compare-significant { background: var(--row-tint-strong); }
+.compare-moderate { background: var(--row-tint-soft); }
 
 .severity-badge {
   display: inline-block;
@@ -876,7 +1000,7 @@ th {
 }
 
 .severity-stable { background: var(--surface-2); color: var(--text-muted); border-color: var(--border); }
-.severity-moderate { background: #fff6e5; color: #7a4b00; border-color: #e8c07a; }
+.severity-moderate { background: var(--warning-bg); color: var(--warning-text); border-color: var(--warning-border); }
 .severity-significant { background: var(--error-bg); color: var(--error-text); border-color: var(--error-border); }
 
 /* Active-filter banner. Same persistent treatment as #partial-banner: both
@@ -885,9 +1009,9 @@ th {
   display: flex;
   align-items: center;
   gap: 14px;
-  background: #eaf2fb;
-  color: #14406f;
-  border: 1px solid #b9d3ee;
+  background: var(--info-bg);
+  color: var(--info-text);
+  border: 1px solid var(--info-border);
   padding: 10px 14px;
   border-radius: 6px;
   margin: 16px 28px 0;
@@ -895,3 +1019,175 @@ th {
 }
 
 #filter-banner-text { flex: 1; }
+
+
+/* --- Findings tab ---------------------------------------------------- */
+
+.findings-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+/* Counts per severity. A row of chips rather than a sentence, so the shape
+   of the result is legible before any of it is read. */
+.findings-summary {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.findings-count {
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  font-size: 0.82rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.findings-checks {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.findings-check {
+  display: flex;
+  gap: 12px;
+  padding: 12px 0;
+  border-top: 1px solid var(--border);
+}
+
+.findings-check:first-child {
+  border-top: none;
+}
+
+.findings-check-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.findings-check-title {
+  font-weight: 600;
+  margin-right: 10px;
+}
+
+.findings-check-status {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+}
+
+/* The marker is the scan's moving part: a hollow dot while pending, a
+   spinner while running, then a state glyph. Shape carries the state, not
+   color alone. */
+.findings-marker {
+  width: 14px;
+  height: 14px;
+  margin-top: 3px;
+  flex: 0 0 14px;
+  border-radius: 50%;
+  border: 2px solid var(--border);
+}
+
+.findings-check[data-status="running"] .findings-marker {
+  border-color: var(--text-muted);
+  border-top-color: transparent;
+  animation: findings-spin 0.7s linear infinite;
+}
+
+.findings-check[data-status="done"] .findings-marker {
+  border-color: var(--text-muted);
+  background: var(--surface-2);
+}
+
+.findings-check[data-status="error"] .findings-marker,
+.findings-check[data-status="cancelled"] .findings-marker {
+  border-style: dashed;
+}
+
+@keyframes findings-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .findings-check[data-status="running"] .findings-marker { animation: none; }
+}
+
+.findings-list {
+  margin-top: 8px;
+}
+
+.finding {
+  padding: 10px 12px;
+  margin-top: 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+}
+
+.finding-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.finding-title {
+  font-weight: 600;
+}
+
+.finding-detail {
+  margin: 6px 0 0;
+  color: var(--text-muted);
+  font-size: 0.88rem;
+  line-height: 1.5;
+}
+
+/* Findings severities. Separate from compare.js's stable/moderate/
+   significant, which are drift-specific — "stable" says nothing about an
+   all-null column. Same labelled-badge rule applies: the text carries the
+   meaning, the color only reinforces it. */
+.severity-critical { background: var(--error-bg); color: var(--error-text); border-color: var(--error-border); }
+.severity-warning { background: var(--warning-bg); color: var(--warning-text); border-color: var(--warning-border); }
+.severity-info { background: var(--surface-2); color: var(--text-muted); border-color: var(--border); }
+
+/* The clean result is a statement, not an absence — an empty panel reads
+   as "not run yet", which is the one thing it must not say. */
+.findings-empty {
+  margin: 0 0 12px;
+  font-weight: 600;
+}
+
+.findings-checks.findings-clean .findings-check {
+  padding: 6px 0;
+}
+
+
+/* Theme picker. A radio group rather than a checkbox, because "System" is a
+   real third state — not the absence of a choice. */
+.settings-theme {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 14px 12px;
+  margin: 0 0 4px;
+}
+
+.settings-theme legend {
+  padding: 0 6px;
+  font-weight: 600;
+  font-size: 0.88rem;
+}
+
+.settings-theme label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-right: 16px;
+  font-size: 0.9rem;
+}
+
+.settings-hint {
+  margin: 8px 0 0;
+  color: var(--text-muted);
+  font-size: 0.82rem;
+}

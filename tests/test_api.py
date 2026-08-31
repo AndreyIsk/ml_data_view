@@ -2,6 +2,7 @@ import json
 
 import polars as pl
 
+from ml_data_view import load_stats
 from ml_data_view.api import Api
 from ml_data_view.audit_log import audit_log_file_path
 from ml_data_view.settings import DEFAULT_BANNER_COLOR, settings_file_path
@@ -826,3 +827,211 @@ def test_loading_a_new_dataset_clears_any_active_filter(tmp_path):
     api.load_file(str(other))
 
     assert api.get_chart_filter()["filter_active"] is False
+
+
+# --- load performance stat line ---------------------------------------
+
+
+def test_load_file_reports_load_stats_for_a_single_file(tmp_path):
+    pl.DataFrame({"id": [1, 2, 3]}).write_csv(tmp_path / "sample.csv")
+
+    api = Api(settings_dir=tmp_path)
+    result = api.load_file(str(tmp_path / "sample.csv"))
+
+    stats = result["load_stats"]
+    assert stats["row_count"] == 3
+    assert stats["file_count"] == 1  # a single open is one file, not "unknown"
+    assert stats["elapsed_seconds"] >= 0
+    assert "Profiled 3 rows across 1 file in " in stats["line"]
+
+
+def test_load_file_stat_line_omits_memory_when_the_reading_is_unavailable(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(load_stats, "peak_memory_bytes", lambda: None)
+    pl.DataFrame({"id": [1]}).write_csv(tmp_path / "sample.csv")
+
+    api = Api(settings_dir=tmp_path)
+    result = api.load_file(str(tmp_path / "sample.csv"))
+
+    assert "memory" not in result["load_stats"]["line"]
+
+
+def test_load_file_times_the_load_itself_not_zero(tmp_path, monkeypatch):
+    """The clock must wrap the real load path — a stat line that always
+    says 0.0s would be worse than no stat line."""
+    clock = iter([100.0, 102.5])
+    monkeypatch.setattr("ml_data_view.api.perf_counter", lambda: next(clock))
+    pl.DataFrame({"id": [1]}).write_csv(tmp_path / "sample.csv")
+
+    api = Api(settings_dir=tmp_path)
+    result = api.load_file(str(tmp_path / "sample.csv"))
+
+    assert result["load_stats"]["elapsed_seconds"] == 2.5
+    assert "in 2.5s" in result["load_stats"]["line"]
+
+
+def test_load_folder_group_reports_stats_across_every_file(tmp_path):
+    data_dir = tmp_path / "dataset_folder"
+    data_dir.mkdir()
+    pl.DataFrame({"id": [1, 2]}).write_parquet(data_dir / "one.parquet")
+    pl.DataFrame({"id": [3, 4, 5]}).write_parquet(data_dir / "two.parquet")
+
+    api = Api(settings_dir=tmp_path / "settings")
+    api.discover_folder(str(data_dir))
+    result = api.load_folder_group(0)
+
+    stats = result["load_stats"]
+    assert stats["row_count"] == 5
+    assert stats["file_count"] == 2
+    assert "Profiled 5 rows across 2 files in " in stats["line"]
+
+
+def test_folder_load_job_result_carries_stats_for_the_worker_thread_load(tmp_path):
+    folder = _make_folder(tmp_path)
+    api = Api(settings_dir=tmp_path)
+    api.discover_folder(str(folder))
+    api.start_folder_load(0)
+    state = api.wait_for_folder_load(timeout=60)
+
+    stats = state["result"]["load_stats"]
+    assert stats["row_count"] == 120
+    assert stats["file_count"] == 4
+    assert stats["elapsed_seconds"] >= 0
+
+
+def test_stopped_folder_load_stats_count_only_the_files_actually_used(tmp_path):
+    """A stopped load is a smaller dataset — the stat line must agree with
+    the partial banner rather than quoting the folder's full file count."""
+    folder = _make_folder(tmp_path, file_count=6)
+    api = Api(settings_dir=tmp_path)
+    api.discover_folder(str(folder))
+    api.start_folder_load(0)
+    api.cancel_folder_load()
+    state = api.wait_for_folder_load(timeout=60)
+
+    result = state["result"]
+    if result is None:  # cancelled before any file finished — nothing to report
+        return
+    stats = result["load_stats"]
+    assert stats["file_count"] == result["files_used"]
+    assert stats["row_count"] == result["row_count"]
+
+
+# --- Findings tab -----------------------------------------------------
+
+
+def test_list_checks_returns_the_full_catalogue_before_any_dataset_is_loaded(tmp_path):
+    """The tab paints every check name as pending before work starts, so
+    the catalogue must not depend on a loaded dataset."""
+    api = Api(settings_dir=tmp_path)
+
+    checks = api.list_checks()["checks"]
+
+    assert [c["id"] for c in checks][:3] == ["empty_dataset", "all_null_column", "high_missingness"]
+    assert {c["kind"] for c in checks} == {"instant", "deep"}
+
+
+def test_run_instant_checks_requires_a_dataset(tmp_path):
+    api = Api(settings_dir=tmp_path)
+
+    assert "error" in api.run_instant_checks()
+
+
+def test_run_instant_checks_reports_pending_before_charts_are_built(tmp_path):
+    """Never a clean state before the checks have run — that is a lie at
+    exactly the moment the user is most likely to trust it."""
+    pl.DataFrame({"id": [1, 2, 3]}).write_csv(tmp_path / "sample.csv")
+    api = Api(settings_dir=tmp_path)
+    api.load_file(str(tmp_path / "sample.csv"))
+
+    result = api.run_instant_checks()
+
+    assert result["pending"] == "charts"
+    assert "findings" not in result
+
+
+def test_run_instant_checks_finds_a_planted_problem(tmp_path):
+    csv_path = tmp_path / "sample.csv"
+    pl.DataFrame({"id": [1, 2, 3, 4], "dead": [None, None, None, None]}).write_csv(csv_path)
+
+    api = Api(settings_dir=tmp_path)
+    api.load_file(str(csv_path))
+    api.get_chart_data()
+    result = api.run_instant_checks()
+
+    all_null = next(c for c in result["checks"] if c["id"] == "all_null_column")
+    assert all_null["status"] == "done"
+    assert all_null["findings"][0]["columns"] == ["dead"]
+    assert result["summary"]["critical"] >= 1
+
+
+def test_run_instant_checks_reports_a_clean_dataset_as_clean(tmp_path):
+    csv_path = tmp_path / "clean.csv"
+    pl.DataFrame({"a": [1, 2, 3, 4], "b": ["w", "x", "y", "z"]}).write_csv(csv_path)
+
+    api = Api(settings_dir=tmp_path)
+    api.load_file(str(csv_path))
+    api.get_chart_data()
+    result = api.run_instant_checks()
+
+    assert result["summary"] == {"critical": 0, "warning": 0, "info": 0}
+    assert all(c["status"] == "done" for c in result["checks"])
+
+
+def test_start_deep_checks_requires_a_dataset(tmp_path):
+    api = Api(settings_dir=tmp_path)
+
+    assert "error" in api.start_deep_checks()
+
+
+def test_deep_checks_run_and_report_per_check_status(tmp_path):
+    parquet_path = tmp_path / "dupes.parquet"
+    pl.DataFrame({"a": [1, 2, 1], "b": ["x", "y", "x"]}).write_parquet(parquet_path)
+
+    api = Api(settings_dir=tmp_path)
+    api.load_file(str(parquet_path))
+    assert api.start_deep_checks()["started"] is True
+    state = api.wait_for_deep_checks(timeout=60)
+
+    assert state["finished"] is True
+    duplicate = next(c for c in state["checks"] if c["id"] == "duplicate_rows")
+    assert duplicate["status"] == "done"
+    assert duplicate["findings"], "the fixture has a planted duplicate row"
+
+
+def test_deep_check_progress_is_idle_before_any_run(tmp_path):
+    api = Api(settings_dir=tmp_path)
+
+    state = api.get_deep_check_progress()
+
+    assert state["stage"] == "idle"
+    assert state["finished"] is False
+
+
+def test_cancel_deep_checks_without_a_running_job_is_an_error(tmp_path):
+    api = Api(settings_dir=tmp_path)
+
+    assert "error" in api.cancel_deep_checks()
+
+
+def test_deep_checks_see_the_folder_file_list(tmp_path):
+    """Per-file scanning, not a query over the concat — the same rule every
+    other multi-file computation follows."""
+    data_dir = tmp_path / "folder"
+    data_dir.mkdir()
+    for index in range(2):
+        pl.DataFrame({"v": [-999] * 5 + list(range(5))}).write_parquet(
+            data_dir / f"part{index}.parquet"
+        )
+
+    api = Api(settings_dir=tmp_path / "settings")
+    api.discover_folder(str(data_dir))
+    api.load_folder_group(0)
+    api.start_deep_checks()
+    state = api.wait_for_deep_checks(timeout=60)
+
+    sentinel = next(c for c in state["checks"] if c["id"] == "sentinel_values")
+    assert sentinel["status"] == "done"
+    # 5 sentinels per file across 2 files, counted exactly.
+    assert "10" in sentinel["findings"][0]["detail"]

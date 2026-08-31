@@ -28,6 +28,12 @@
     <div id="classification-banner-slot"></div>
   </header>
 
+  <!-- One quiet line after a successful load: how much was profiled, how
+       long it took, peak process memory. Informational, deliberately not
+       styled as a banner — the banners below carry warnings, this carries
+       a measurement. Hidden until there is something true to say. -->
+  <p id="load-stats" class="hidden" role="status"></p>
+
   <section id="error-banner" class="hidden"></section>
 
   <!-- Shown after a STOPPED folder load. Deliberately persistent (not a
@@ -49,6 +55,7 @@
       <button type="button" class="nav-item" data-section="distributions">Distributions</button>
       <button type="button" class="nav-item" data-section="embeddings">Embeddings</button>
       <button type="button" class="nav-item" data-section="media">Media</button>
+      <button type="button" class="nav-item" data-section="findings">Findings</button>
       <button type="button" class="nav-item" data-section="search">Search</button>
       <button type="button" class="nav-item" data-section="compare">Compare</button>
       <button type="button" class="nav-item" data-section="reports">Reports</button>
@@ -191,6 +198,31 @@
         </div>
       </section>
 
+      <section id="section-findings" class="app-section hidden">
+        <h2 class="section-heading">Findings</h2>
+        <div class="panel">
+          <p class="chart-note">
+            Automatic checks over the loaded dataset. The instant checks read figures
+            already computed for the other tabs, so they cost nothing; deep checks read
+            data and run only when asked.
+          </p>
+          <div class="findings-actions">
+            <button type="button" id="deep-checks-btn" class="btn-primary">Run deep checks</button>
+          </div>
+          <div id="deep-checks-progress" class="hidden compare-progress">
+            <progress id="deep-checks-bar" max="100" value="0"></progress>
+            <span id="deep-checks-pct"></span>
+            <button type="button" id="deep-checks-stop-btn" class="btn-stop">Stop</button>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div id="findings-summary" class="findings-summary hidden"></div>
+          <ul id="findings-checks" class="findings-checks"></ul>
+          <p id="findings-empty" class="findings-empty hidden"></p>
+        </div>
+      </section>
+
       <section id="section-compare" class="app-section hidden">
         <h2 class="section-heading">Compare</h2>
         <div class="panel">
@@ -258,6 +290,21 @@
         <h2 class="section-heading">Settings</h2>
 
         <div class="panel">
+          <h2>Appearance</h2>
+          <p class="chart-note">
+            Charts and tables follow the theme. Generated PDF reports stay
+            light — they are printed and shared outside the app.
+          </p>
+          <fieldset class="settings-field settings-theme">
+            <legend>Theme</legend>
+            <label><input type="radio" name="settings-theme" value="system" /> System</label>
+            <label><input type="radio" name="settings-theme" value="light" /> Light</label>
+            <label><input type="radio" name="settings-theme" value="dark" /> Dark</label>
+            <p class="settings-hint">System follows your operating system's light/dark setting.</p>
+          </fieldset>
+        </div>
+
+        <div class="panel">
           <h2>Classification banner</h2>
           <p class="chart-note">
             Marks every screen with a label of your choosing — e.g. a
@@ -313,5 +360,8 @@
        and app.js's renderDataset() calls resetSearchForDataset() at runtime. -->
   <script src="search.js"></script>
   <script src="compare.js"></script>
+  <!-- After app.js: findings.js uses its LOAD_POLL_MS, and app.js calls
+       resetFindingsForDataset()/runFindingsScan() at runtime. -->
+  <script src="findings.js"></script>
 </body>
 </html>

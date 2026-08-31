@@ -21,6 +21,12 @@ SETTINGS_FILENAME = "settings.json"
 # been configured yet shouldn't default to an alarming color.
 DEFAULT_BANNER_COLOR = "#83827c"
 
+# "system" follows the OS via prefers-color-scheme; the other two override
+# it. Default is "system" so a first launch matches the machine rather than
+# imposing a choice nobody made.
+THEMES = ("system", "light", "dark")
+DEFAULT_THEME = "system"
+
 
 @dataclass(frozen=True)
 class AppSettings:
@@ -32,6 +38,7 @@ class AppSettings:
     classification_banner_label: str = ""
     classification_banner_color: str = DEFAULT_BANNER_COLOR
     audit_log_enabled: bool = False
+    theme: str = DEFAULT_THEME
     # Named row searches, each {"name", "conditions", "columns"} — see
     # search.py. Stored here rather than in their own file so a user's
     # whole local state stays one JSON document.
@@ -45,7 +52,13 @@ class AppSettings:
         defaults = cls()
         field_names = defaults.to_dict().keys()
         known = {k: v for k, v in data.items() if k in field_names}
-        return cls(**{**defaults.to_dict(), **known})
+        merged = {**defaults.to_dict(), **known}
+        # An unrecognised theme (hand-edited file, or one written by a
+        # future version) must not leave the frontend with a value it
+        # cannot resolve to a stylesheet.
+        if merged.get("theme") not in THEMES:
+            merged["theme"] = DEFAULT_THEME
+        return cls(**merged)
 
 
 def app_data_dir() -> Path:

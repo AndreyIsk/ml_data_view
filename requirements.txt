@@ -8,5 +8,6 @@ pytest>=8.0
 reportlab>=5.0
 plotly>=6.1.1
 kaleido>=1.3
+psutil>=5.9  # load_stats.py: process peak working set for the post-load stat line
 pywin32>=306  # scripts/job_cap.py: Windows Job Object memory ceiling for diagnostic/test subprocesses
 pypdf>=4.0  # tests only: assert PDF page count / header-footer placement

@@ -19,6 +19,7 @@ const loadProgressBar = document.getElementById("load-progress-bar");
 const loadProgressPct = document.getElementById("load-progress-pct");
 const stopLoadBtn = document.getElementById("stop-load-btn");
 const partialBanner = document.getElementById("partial-banner");
+const loadStatsLine = document.getElementById("load-stats");
 
 const TEXT_TRUNCATE_LENGTH = 100; // Phase 3: preview-table cells longer than this get a "…" + click-to-expand
 
@@ -95,8 +96,10 @@ function showLoading(message) {
   loadingIndicator.classList.remove("hidden");
   openFileBtn.disabled = true;
   // Any new load invalidates a previous load's "partial" warning — it must
-  // never outlive the dataset it described.
+  // never outlive the dataset it described. The stat line goes for the
+  // same reason: it measures one specific load.
   partialBanner.classList.add("hidden");
+  loadStatsLine.classList.add("hidden");
 }
 
 function hideLoading() {
@@ -109,13 +112,57 @@ function hideLoading() {
 // small multiples reads as one coherent system, not a rainbow. The null
 // heatmap uses a separate severity ramp (status "critical" red, never a
 // categorical hue) since it encodes "how bad is the missingness", not identity.
-const SERIES_COLOR = "#2a78d6"; // categorical slot 1 (blue)
-const MISSING_COLOR = "#d03b3b"; // status: critical
-const PRESENT_COLOR = "#f0efec"; // neutral surface-adjacent gray
-const GRIDLINE_COLOR = "#e2e1dc"; // one-step-off-surface, hairline
-const AXIS_TEXT_COLOR = "#52514e"; // text-secondary — axis text never wears the data color
+//
+// These are READ FROM style.css rather than declared here, and re-read on
+// every theme change. Before night mode they were literals in this file
+// while the UI palette lived in the stylesheet; a second palette would have
+// made that four lists to keep in sync. `let` rather than `const` so
+// refreshChartColors() can re-point them without touching the ~28 call
+// sites below — the charts are fully re-rendered after a theme change, so
+// nothing holds a stale value across the swap.
+function themeColor(name) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
 
-const PLOT_FONT = { family: "system-ui, -apple-system, 'Segoe UI', sans-serif", color: AXIS_TEXT_COLOR, size: 11 };
+let SERIES_COLOR; // categorical slot 1 (blue)
+let MISSING_COLOR; // status: critical — mode-invariant, a severity is not a theme
+let PRESENT_COLOR; // neutral surface-adjacent
+let GRIDLINE_COLOR; // one-step-off-surface, hairline
+let AXIS_TEXT_COLOR; // text-secondary — axis text never wears the data color
+let PLOT_FONT;
+let EMBEDDING_CATEGORICAL_COLORS;
+let EMBEDDING_OTHER_COLOR;
+let EMBEDDING_MISSING_COLOR;
+let MARKER_SURFACE_RING;
+
+function refreshChartColors() {
+  SERIES_COLOR = themeColor("--chart-series");
+  MISSING_COLOR = themeColor("--chart-missing");
+  PRESENT_COLOR = themeColor("--chart-present");
+  GRIDLINE_COLOR = themeColor("--chart-gridline");
+  AXIS_TEXT_COLOR = themeColor("--chart-axis-text");
+  PLOT_FONT = {
+    family: "system-ui, -apple-system, 'Segoe UI', sans-serif",
+    color: AXIS_TEXT_COLOR,
+    size: 11,
+  };
+  EMBEDDING_CATEGORICAL_COLORS = [
+    themeColor("--chart-cat-1"),
+    themeColor("--chart-cat-2"),
+    themeColor("--chart-cat-3"),
+  ];
+  EMBEDDING_OTHER_COLOR = themeColor("--chart-other");
+  EMBEDDING_MISSING_COLOR = themeColor("--chart-missing-bucket");
+  MARKER_SURFACE_RING = themeColor("--chart-marker-ring");
+}
+
+// Filled in immediately, not on first draw: pywebview injects its api
+// asynchronously, so initSettings() (which applies the persisted theme) can
+// land after a chart has already been drawn. style.css is a plain <link> in
+// <head> and this script runs at the end of <body>, so the light palette is
+// resolvable here — the persisted theme, if it differs, re-runs this and
+// re-renders.
+refreshChartColors();
 
 // Embedding scatter color-by (dataviz skill's validated palette, palette.md):
 // scatter is an "all-pairs" chart form — any two categories can land next to
@@ -125,10 +172,9 @@ const PLOT_FONT = { family: "system-ui, -apple-system, 'Segoe UI', sans-serif", 
 // backend buckets each color-by column to top-3 + "Other" to match (see
 // embedding_data.EMBEDDING_COLOR_TOP_N); "Other"/"Missing" get non-identity
 // neutrals, never a 4th hue.
-const EMBEDDING_CATEGORICAL_COLORS = ["#2a78d6", "#eb6834", "#1baf7a"]; // slots 1-3: blue, orange, aqua
-const EMBEDDING_OTHER_COLOR = "#898781"; // muted ink — non-identity bucket
-const EMBEDDING_MISSING_COLOR = "#c3c2b7"; // baseline/border gray — distinct neutral from "Other"
-const MARKER_SURFACE_RING = "#ffffff"; // surface color — separates overlapping markers, not a data-carrying stroke
+// (slots 1-3, "Other"/"Missing" neutrals and the marker ring are declared
+// and filled in by refreshChartColors() above, from --chart-cat-1..3,
+// --chart-other, --chart-missing-bucket and --chart-marker-ring.)
 
 // Plotly's chart containers need to react to ANY change in their own
 // rendered size — a window resize, a CSS grid reflow that changes the
@@ -264,6 +310,21 @@ function renderPreview(columns, rows, textColumns) {
   previewSection.classList.remove("hidden");
 }
 
+// The backend hands over a ready-made sentence (load_stats.py) rather than
+// raw numbers to assemble here: its omission rules — drop a clause whose
+// figure is unknown instead of showing a zero — are unit-tested in Python,
+// and duplicating them in JS is exactly how the two would drift apart.
+function renderLoadStats(stats) {
+  const line = stats && stats.line;
+  if (!line) {
+    loadStatsLine.textContent = "";
+    loadStatsLine.classList.add("hidden");
+    return;
+  }
+  loadStatsLine.textContent = line;
+  loadStatsLine.classList.remove("hidden");
+}
+
 function renderDataset(data) {
   filePathSpan.textContent = data.file_path;
   rowCountSpan.textContent = data.row_count.toLocaleString();
@@ -277,11 +338,15 @@ function renderDataset(data) {
   } else {
     summaryFileCountRow.classList.add("hidden");
   }
+  renderLoadStats(data.load_stats);
   renderSchema(data.columns);
   renderPreview(data.columns, data.preview_rows, new Set(data.text_columns || []));
   // search.js loads after this file; the call happens at runtime, so the
   // function is defined by the time a dataset is opened.
   resetSearchForDataset(data.columns);
+  // Same for findings.js: paint the check catalogue as pending so the tab
+  // is never blank, and drop the previous dataset's results.
+  resetFindingsForDataset();
 }
 
 // Shared by handleOpenFile and handleOpenFolder once each has its own
@@ -322,6 +387,10 @@ async function finishLoadingDataset(data) {
   }
   await renderCharts(chartData);
   await refreshReportsSection();
+  // Instant checks read the payload that just finished building, so this
+  // is the earliest honest moment to run them — before it, "nothing found"
+  // would mean "nothing looked".
+  await runFindingsScan();
   return true;
 }
 
@@ -613,7 +682,7 @@ async function drawEmbeddingScatter(plotDiv, projection, colorByColumn) {
   await drawPlot(plotDiv, traces, layout, { displayModeBar: false, responsive: true });
 }
 
-function renderEmbeddingCard(projection) {
+function renderEmbeddingCard(projection, initialColorBy) {
   const card = document.createElement("div");
   card.className = "embedding-card";
 
@@ -639,6 +708,11 @@ function renderEmbeddingCard(projection) {
     for (const column of colorByColumns) {
       select.appendChild(new Option(column, column));
     }
+    // Restored after a theme re-render — silently resetting the user's
+    // chosen color-by because the palette changed would be its own bug.
+    if (initialColorBy && colorByColumns.includes(initialColorBy)) {
+      select.value = initialColorBy;
+    }
     colorByWrap.appendChild(select);
     header.appendChild(colorByWrap);
 
@@ -662,6 +736,14 @@ function renderEmbeddingCard(projection) {
 async function renderEmbeddingProjections(projections) {
   const container = document.getElementById("embedding-projections");
   const section = document.getElementById("embedding-projections-section");
+  // Captured before the cards are torn down, so a re-render (theme change,
+  // most often) puts each card's color-by back where the user left it.
+  const previousColorBy = new Map();
+  for (const card of container.querySelectorAll(".embedding-card")) {
+    const title = card.querySelector(".chart-title");
+    const select = card.querySelector(".embedding-color-by select");
+    if (title && select) previousColorBy.set(title.textContent, select.value);
+  }
   for (const oldDiv of container.querySelectorAll(".embedding-plot")) {
     untrackPlot(oldDiv);
   }
@@ -676,9 +758,10 @@ async function renderEmbeddingProjections(projections) {
   observeContainer(container); // stable — Plotly never resizes #embedding-projections itself
 
   for (const projection of plottable) {
-    const { card, plotDiv } = renderEmbeddingCard(projection);
+    const colorBy = previousColorBy.get(projection.column) || null;
+    const { card, plotDiv } = renderEmbeddingCard(projection, colorBy);
     container.appendChild(card);
-    await drawEmbeddingScatter(plotDiv, projection, null);
+    await drawEmbeddingScatter(plotDiv, projection, colorBy);
   }
 }
 
@@ -772,7 +855,13 @@ function renderCorrelatedMissingness(groups) {
   section.classList.remove("hidden");
 }
 
+// The most recently rendered chart payload. Held so a theme change can
+// re-render from it: rebuilding it costs ~0.54s per file (minutes on a big
+// folder), while re-rendering already-fetched data is instant.
+let latestChartData = null;
+
 async function renderCharts(chartData) {
+  latestChartData = chartData;
   document.querySelectorAll(".chart-content").forEach((el) => el.classList.remove("hidden"));
   renderCorrelatedMissingness(chartData.correlated_missingness);
   await renderNullHeatmap(chartData.null_heatmap);
@@ -832,6 +921,39 @@ const settingsBannerLabel = document.getElementById("settings-banner-label");
 const settingsBannerColor = document.getElementById("settings-banner-color");
 const settingsAuditEnabled = document.getElementById("settings-audit-enabled");
 const settingsAuditLogPath = document.getElementById("settings-audit-log-path");
+const settingsThemeInputs = document.querySelectorAll('input[name="settings-theme"]');
+
+// --- Theme ------------------------------------------------------------
+//
+// The palette itself lives entirely in style.css (":root" and
+// '[data-theme="dark"]'). This side only decides WHICH of the two applies
+// and stamps it on <html>. "system" is resolved here through matchMedia
+// rather than by a CSS media query, so there is exactly one place the dark
+// values are written and an explicit Light/Dark choice wins in both
+// directions without a specificity fight.
+const darkModeQuery = window.matchMedia("(prefers-color-scheme: dark)");
+let themePreference = "system";
+
+function resolveTheme(preference) {
+  if (preference === "light" || preference === "dark") return preference;
+  return darkModeQuery.matches ? "dark" : "light";
+}
+
+// `rerender` is false only during startup, when no charts exist yet.
+async function applyTheme(preference, { rerender = true } = {}) {
+  themePreference = preference;
+  document.documentElement.dataset.theme = resolveTheme(preference);
+  // Must follow the stamp: the constants are read back out of the
+  // stylesheet, so they pick up whichever block is now in effect.
+  refreshChartColors();
+  if (rerender && latestChartData) await renderCharts(latestChartData);
+}
+
+// Only while following the OS — an explicit choice must not be overridden
+// when the machine flips at sunset.
+darkModeQuery.addEventListener("change", () => {
+  if (themePreference === "system") applyTheme("system");
+});
 
 // Simple relative-luminance check (WCAG-style, not exact) so a light banner
 // color gets dark text and a dark one gets white text — the label stays
@@ -880,6 +1002,9 @@ function applySettingsToForm(settings) {
   settingsBannerColor.value = settings.classification_banner_color;
   settingsAuditEnabled.checked = settings.audit_log_enabled;
   settingsAuditLogPath.textContent = settings.audit_log_path;
+  for (const input of settingsThemeInputs) {
+    input.checked = input.value === settings.theme;
+  }
 }
 
 // Saves immediately (no explicit Save button, per the settings spec) and
@@ -889,6 +1014,7 @@ async function saveSettings(update) {
   const settings = await window.pywebview.api.save_settings(update);
   applySettingsToForm(settings);
   renderClassificationBanner(settings);
+  if (settings.theme !== themePreference) await applyTheme(settings.theme);
 }
 
 settingsBannerEnabled.addEventListener("change", () => {
@@ -903,11 +1029,18 @@ settingsBannerColor.addEventListener("change", () => {
 settingsAuditEnabled.addEventListener("change", () => {
   saveSettings({ audit_log_enabled: settingsAuditEnabled.checked });
 });
+for (const input of settingsThemeInputs) {
+  input.addEventListener("change", () => {
+    if (input.checked) saveSettings({ theme: input.value });
+  });
+}
 
 async function initSettings() {
   const settings = await window.pywebview.api.get_settings();
   applySettingsToForm(settings);
   renderClassificationBanner(settings);
+  // No charts exist yet at startup, so nothing to re-render.
+  await applyTheme(settings.theme || "system", { rerender: false });
 }
 
 // pywebview injects window.pywebview.api asynchronously; `pywebviewready`

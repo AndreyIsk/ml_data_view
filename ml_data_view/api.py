@@ -12,6 +12,7 @@ revisit if/when a dataset with date columns is opened.
 from __future__ import annotations
 
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 
 import polars as pl
@@ -36,6 +37,9 @@ from ml_data_view.data_loader import (
     row_count,
     scan_dataframe,
 )
+from ml_data_view.deep_checks import DEEP_CHECKS, DeepContext
+from ml_data_view.findings import INSTANT_CHECKS, run_instant_checks, severity_summary, sorted_findings
+from ml_data_view.findings_job import DeepCheckJob
 from ml_data_view.folder_load_job import FolderLoadJob
 from ml_data_view.folder_loader import (
     FolderScanResult,
@@ -44,6 +48,7 @@ from ml_data_view.folder_loader import (
     scan_folder,
 )
 from ml_data_view.image_data import resolve_image_full
+from ml_data_view.load_stats import build_load_stats
 from ml_data_view.report import available_sections, generate_report as write_report_pdf
 from ml_data_view.search import (
     SEARCH_ROW_LIMIT,
@@ -114,6 +119,11 @@ class Api:
         # The in-flight chart build, if any (start_chart_build).
         self._chart_build_job: ChartBuildJob | None = None
         self._chart_build_adopted = False
+        # The in-flight deep-check run, if any (start_deep_checks).
+        self._deep_check_job: DeepCheckJob | None = None
+        # Columns Phase 1 classified as "text" for the current dataset,
+        # cached from the load rather than reclassified on demand.
+        self._text_columns: list[str] = []
         # The predicate and column projection from the most recent
         # run_search(), reused by the count and export jobs so they can
         # never describe a different query than the rows on screen.
@@ -185,6 +195,9 @@ class Api:
         very first render instead of waiting for the chart-data round trip.
         """
         record_file_open(Path(path).name, self._settings, base_dir=self._settings_dir)
+        # The clock starts at the real work, not at the audit write — the
+        # stat line describes profiling the dataset, not bookkeeping.
+        started_at = perf_counter()
         try:
             lf = scan_dataframe(path)
         except (UnsupportedFileTypeError, FileNotFoundError) as exc:
@@ -204,7 +217,16 @@ class Api:
         info["text_columns"] = [
             column for column in lf.collect_schema() if classify_column(lf, column) == "text"
         ]
+        # Cached because the selection/detail surfaces need to know which
+        # columns get the truncate-with-popup treatment, and classification
+        # is a real query — not something to repeat per request.
+        self._text_columns = list(info["text_columns"])
         info["source_type"] = "file"
+        info["load_stats"] = build_load_stats(
+            row_count=self._current_row_count,
+            file_count=1,
+            elapsed_seconds=perf_counter() - started_at,
+        )
         return info
 
     def get_settings(self) -> dict[str, Any]:
@@ -565,6 +587,80 @@ class Api:
             self._compare_job.wait(timeout)
         return self.get_comparison_progress()
 
+    # --- Findings --------------------------------------------------------
+
+    def list_checks(self) -> dict[str, Any]:
+        """The full check catalogue, instant and deep.
+
+        Deliberately independent of a loaded dataset: the tab paints every
+        check name with a pending marker BEFORE running anything, which is
+        what makes it read as a scan rather than a list that appears all at
+        once.
+        """
+        return {
+            "checks": [
+                {"id": spec.id, "title": spec.title, "kind": spec.kind}
+                for spec in (*INSTANT_CHECKS, *DEEP_CHECKS)
+            ]
+        }
+
+    def run_instant_checks(self) -> dict[str, Any]:
+        """Run every instant check over data already computed — no reads.
+
+        Returns {"pending": "charts"} when the chart payload isn't built
+        yet, rather than a clean result. The checks read that payload, so
+        "nothing found" before it exists would mean "nothing looked",
+        presented as reassurance.
+        """
+        if self._current_lazy is None:
+            return {"error": "No dataset loaded yet. Open a file or folder first."}
+        if not self._chart_data:
+            return {"pending": "charts"}
+
+        results = run_instant_checks(self._dataset_info or {}, self._chart_data)
+        return {
+            "checks": results,
+            "findings": [finding.to_dict() for finding in sorted_findings(results)],
+            "summary": severity_summary(sorted_findings(results)),
+        }
+
+    def _deep_context(self) -> DeepContext:
+        return DeepContext(
+            lf=self._current_lazy,
+            files=list(self._current_files) if self._current_files else None,
+            dataset_dir=self._dataset_dir(),
+            image_columns=list((self._chart_data or {}).get("image_columns") or []),
+        )
+
+    def start_deep_checks(self) -> dict[str, Any]:
+        """Begin the deep checks on a worker thread; returns at once."""
+        if self._current_lazy is None:
+            return {"error": "No dataset loaded yet. Open a file or folder first."}
+        self._deep_check_job = DeepCheckJob(self._deep_context())
+        self._deep_check_job.start()
+        return {"started": True}
+
+    def get_deep_check_progress(self) -> dict[str, Any]:
+        """Snapshot of the running deep checks, including per-check status
+        so completed checks render while later ones still run."""
+        if self._deep_check_job is None:
+            return {**dict(self._IDLE_PROGRESS), "checks": []}
+        return self._deep_check_job.progress()
+
+    def cancel_deep_checks(self) -> dict[str, Any]:
+        """Stop at the next check boundary. Completed checks are kept."""
+        if self._deep_check_job is None:
+            return {"error": "No deep checks in progress."}
+        self._deep_check_job.cancel()
+        return {"cancelled": True}
+
+    def wait_for_deep_checks(self, timeout: float | None = None) -> dict[str, Any]:
+        """Block until the run settles — for headless callers and tests."""
+        if self._deep_check_job is None:
+            return self.get_deep_check_progress()
+        self._deep_check_job.wait(timeout)
+        return self.get_deep_check_progress()
+
     def _banner_settings(self) -> dict[str, Any]:
         return {
             "enabled": self._settings.classification_banner_enabled,
@@ -737,6 +833,7 @@ class Api:
         self._chart_filter_conditions = []
         self._search_predicate = None
         self._dataset_info = result
+        self._text_columns = list(result.get("text_columns") or [])
         self._chart_data = None  # stale for the newly loaded dataset
 
     def load_folder_group(self, group_index: int) -> dict[str, Any]:
@@ -748,6 +845,7 @@ class Api:
         "folder_open" action the same way load_file() logs "file_open".
         """
         checkpoint("group_selection:start", f"group_index={group_index}")
+        started_at = perf_counter()
         if self._folder_scan_result is None:
             return {"error": "No folder scanned yet. Open a folder first."}
         groups = self._folder_scan_result.groups
@@ -793,7 +891,13 @@ class Api:
             for column in lf.collect_schema()
             if classify_column(lf, column, files=group.files) == "text"
         ]
+        self._text_columns = list(info["text_columns"])
         info["source_type"] = "folder"
         info["file_count"] = group.file_count
+        info["load_stats"] = build_load_stats(
+            row_count=self._current_row_count,
+            file_count=group.file_count,
+            elapsed_seconds=perf_counter() - started_at,
+        )
         checkpoint("group_selection:done")
         return info

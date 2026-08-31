@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import threading
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 
 import polars as pl
@@ -28,6 +29,7 @@ import polars as pl
 from ml_data_view.chart_data import classify_column
 from ml_data_view.data_loader import _null_counts, dataset_info_from_lazy
 from ml_data_view.folder_loader import SchemaGroup
+from ml_data_view.load_stats import build_load_stats
 
 # Share of the progress bar given to each phase, from a measured 250-file
 # load: 83.3s counting nulls, 24.0s classifying (discovery was 0.3s and is
@@ -113,6 +115,7 @@ class FolderLoadJob:
             self._done.set()
 
     def _load(self) -> None:
+        started_at = perf_counter()
         files = self._group.files
         total = len(files)
 
@@ -184,6 +187,14 @@ class FolderLoadJob:
         payload["files_used"] = len(used_files)
         payload["files_total"] = total
         payload["partial"] = partial or self._cancelled()
+        # Counts describe what was actually loaded, so a stopped load's
+        # stat line agrees with the partial banner instead of quoting the
+        # folder's full size for a dataset that is smaller than that.
+        payload["load_stats"] = build_load_stats(
+            row_count=row_count,
+            file_count=len(used_files),
+            elapsed_seconds=perf_counter() - started_at,
+        )
 
         # A cancelled load keeps the fraction it reached. Snapping the bar
         # to 100% on Stop reads as "finished successfully", which is the
