@@ -138,7 +138,7 @@ training dataset without writing pandas code every time.
 
 
 
-\## Current phase: PHASE 7 (Reports) — PDF export shipped, plus large-folder scaling, report refinements, the post-load stat line, the Findings tab and night mode
+\## Current phase: PHASE 5 (Packaging) — part 1, the standalone Windows .exe. BUILDS SUCCESSFULLY; NEEDS CLEAN-MACHINE VERIFICATION (see "Executable build" below). Installer and licensing are separate follow-up steps, not started.
 
 Built:
 
@@ -316,6 +316,57 @@ An otter logo wired in as the app icon. Source art at assets/otter.png; scripts/
 \- NOTE ON THE SOURCE ART: assets/otter.png is actually a JPEG (RGB, no alpha) on a solid teal background, despite the .png extension. So every icon carries that teal square rather than a transparent cutout. Keying the teal out is not viable on this file — the fur edges and whiskers are antialiased against it and would fringe or vanish. A genuinely transparent source can be dropped in at the same path and `python scripts/make\_icons.py` re-run; nothing else needs to change.
 
 \- The .exe/installer icon is NOT wired up: that is packaging, which the roadmap puts in Phase 5. The .ico is the artifact PyInstaller will want when that phase starts.
+
+\## Executable build (Phase 5, part 1)
+
+Status: **builds successfully; needs clean-machine verification.** Everything below was verified on the DEVELOPMENT machine, which has Python, the venv, and Google Chrome installed — none of which proves behaviour on a bare Windows box.
+
+\### Build command
+
+```
+.venv/Scripts/python.exe -m pip install -r requirements-lock.txt
+.venv/Scripts/python.exe -m PyInstaller --noconfirm --clean MLDatasetProfiler.spec
+```
+
+Output: `dist/MLDatasetProfiler.exe` (~193MB, onefile, windowed) and `dist/MLDatasetProfiler-selftest.exe` (same bundle, console). `build/` and `dist/` are gitignored; the .spec is committed so the build is reproducible.
+
+\- requirements-lock.txt pins every package with `==` (requirements.txt uses `>=` and would resolve newer ones). tests/test\_resources.py fails if any line loses its pin.
+
+\### How the frozen build is verified at all
+
+scripts/frozen\_selftest.py is built as its own CONSOLE executable from the same Analysis. A windowed app cannot report on itself, and the failures that matter here are invisible from source — a lazily-imported package left out of the bundle, a data file at the wrong bundled path, kaleido unable to find a browser. Run it and read the output; exit code is 0 only if all 12 checks pass.
+
+Result on the dev machine, frozen: **12/12 pass** (identical to the same script run from source). Covers: \_MEIPASS resolution; all 7 bundled frontend/asset files present; writable dir outside the bundle; polars+pyarrow lazy scan staying bounded (largest collect 50 rows of 50,000); sklearn's lazy import projecting an embedding; kaleido browser discovery; kaleido PNG rasterization; a full reportlab PDF; the Api layer (open, chart build, findings); both worker-thread job classes; settings round-trip; checkpoint logging.
+
+\### Frozen-only fixes this required
+
+\- **ml\_data\_view/resources.py (new).** Once frozen, `Path(\_\_file\_\_).parent` names nothing real — code runs from a PYZ archive and data files unpack to `sys.\_MEIPASS`. `resource_path()` answers "where is this bundled file", `writable_dir()` answers "where may I write". They are different questions with different answers, and nothing writes to the bundle.
+\- **main.py** resolved FRONTEND\_DIR and ICON\_PATH through `resource_path()`; both were `Path(\_\_file\_\_)` anchors that would have found nothing in the .exe.
+\- **checkpoint\_log.py** wrote its log to a path derived from `\_\_file\_\_`, i.e. inside `\_MEIPASS` — a temp directory deleted on exit, and potentially read-only. Since `checkpoint()` is called on every folder load and was unguarded, a failed write there would have crashed folder loading in the packaged app only. Now writes to the per-user app-data directory and swallows OSError.
+\- **kaleido.mocker** calls argparse's `parse\_args()` AT IMPORT TIME, so PyInstaller's submodule scan exited with SystemExit and killed the build. Filtered out in the .spec.
+
+\### THE KALEIDO CAVEAT — read before shipping
+
+The Phase 5 note in "Tech stack" above was correct: **kaleido does not bundle a browser.** `kaleido/executable/bin/` contains only log files. Chart rasterization for PDF export drives a real Chromium through choreographer, which finds one by (a) a copy kaleido previously downloaded into `%LOCALAPPDATA%\plotly\choreographer\deps`, or (b) scanning for an installed Chrome/Chromium/Edge/Brave/Vivaldi.
+
+So **PDF export is NOT self-contained.** On the dev machine it resolves `C:\Program Files (x86)\Google\Chrome\Application\chrome.exe`. On a clean machine it will most likely find Edge, which ships with Windows 10/11 and is in choreographer's list — but that is reasoning, not a measurement, and it is exactly what the clean-machine test must settle. Everything else in the app works without a browser; only Reports depends on this.
+
+\### What was NOT verified, and what to test on a clean machine
+
+Verified only on a machine that has Python, the venv and Chrome. A clean Windows VM with NO Python and NO Chrome must confirm:
+
+1. **It launches at all.** Copy `dist/MLDatasetProfiler.exe` across and double-click. This is the one thing a dev-machine test cannot establish — a bundle can silently pick up a DLL from the dev machine's PATH.
+2. **Run `MLDatasetProfiler-selftest.exe` first.** It prints 12 PASS/FAIL lines and is the fastest way to localise any failure.
+3. **PDF export specifically**, on a VM with Edge but no Chrome, and again on one with neither. Expect "kaleido: browser discovery" to FAIL in the second case; decide then whether to ship a browser or require one.
+4. **Open a real dataset** — a large folder, not the tiny synthetic frames the self-test uses. Peak memory and the bounded-collect behaviour were measured from source, never from the .exe against the 195.8M-row Criteo folder.
+5. **The window icon and title bar** (verified here: WM\_GETICON returns the otter on the frozen window).
+6. **Windows SmartScreen / Defender.** The .exe is unsigned; SmartScreen will warn on first run on a machine that has not seen it. Code signing is not part of this step.
+
+\### Known properties
+
+\- **Onefile costs ~5-6s of startup**, every launch: the 193MB archive is extracted to a temp directory each time (measured: 11.4/11.5/11.7s frozen vs 5.3/6.3s from source, for the same work). `onedir` removes that and is probably what the installer step wants — it is a one-line change in the .spec.
+\- **scripts/job\_cap.py works against the frozen .exe** (it CreateProcess's an arbitrary command line, so freezing is irrelevant to it). Verified both directions: 3072MB cap → completes, peak 1529.7 MiB; 400MB cap → allocations refused by the OS, exit code 1 at peak 373.5 MiB. job\_cap itself is a dev/diagnostics script and is NOT bundled into the .exe.
+\- The .exe is unsigned and ~193MB.
 
 \## Explicit non-goals right now
 

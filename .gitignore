@@ -11,3 +11,8 @@ folder_open_diagnostics.log
 
 # Local test dataset (~13GB of real Criteo parquet). Never commit data.
 criteo/
+
+# PyInstaller build output (Phase 5) — ~400MB, rebuilt from MLDatasetProfiler.spec
+build/
+dist/
+*.manifest

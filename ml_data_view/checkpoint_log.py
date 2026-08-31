@@ -20,10 +20,15 @@ import ctypes
 import os
 import sys
 import time
-from pathlib import Path
 
-# ml_data_view/checkpoint_log.py -> ml_data_view/ -> project root
-LOG_PATH = Path(__file__).resolve().parent.parent / "folder_open_diagnostics.log"
+from ml_data_view.resources import writable_dir
+
+# Repository root from source; the per-user app-data directory once frozen.
+# It must NOT be the bundle: sys._MEIPASS is a temp directory deleted on
+# exit, so the log would vanish — and on a locked-down machine the open()
+# below would fail outright, inside a function api.py calls on every
+# folder load.
+LOG_PATH = writable_dir() / "folder_open_diagnostics.log"
 
 _start_time = time.monotonic()
 
@@ -108,10 +113,17 @@ def checkpoint(stage: str, detail: str = "") -> None:
     line = f"{time.strftime('%Y-%m-%d %H:%M:%S')} | +{elapsed:8.3f}s | mem={memory_repr:>12} | {stage}"
     if detail:
         line += f" | {detail}"
-    with open(LOG_PATH, "a", encoding="utf-8") as log_file:
-        log_file.write(line + "\n")
-        log_file.flush()
-        try:
-            os.fsync(log_file.fileno())
-        except Exception:
-            pass  # best-effort — flush() above already covers a plain process kill
+    try:
+        with open(LOG_PATH, "a", encoding="utf-8") as log_file:
+            log_file.write(line + "\n")
+            log_file.flush()
+            try:
+                os.fsync(log_file.fileno())
+            except Exception:
+                pass  # best-effort — flush() above already covers a plain process kill
+    except OSError:
+        # Diagnostics must never take the app down. This is temporary
+        # instrumentation (see the module docstring); a read-only or
+        # missing log directory in a packaged install is not a reason
+        # for a folder load to fail.
+        pass

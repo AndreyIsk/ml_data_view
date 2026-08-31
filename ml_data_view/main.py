@@ -1,19 +1,22 @@
 """Entry point — launches the pywebview window."""
 from __future__ import annotations
 
-from pathlib import Path
-
 import webview
 
 from ml_data_view.api import Api
+from ml_data_view.resources import resource_path
 
-FRONTEND_DIR = Path(__file__).parent / "frontend"
+# Resolved through resource_path so these work both from source and from
+# inside the frozen .exe, where the code lives in a PYZ archive and the
+# data files are unpacked to sys._MEIPASS. A Path(__file__) anchor here
+# would point into the archive and find nothing.
+FRONTEND_DIR = resource_path("ml_data_view", "frontend")
 # Multi-size .ico (16/32/48/64/128/256), built from assets/otter.png by
 # scripts/make_icons.py. Windows picks a different frame from the same file
 # for the title bar, taskbar and Alt-Tab, which is why it is an .ico rather
 # than a PNG — .NET's System.Drawing.Icon, which pywebview hands this to,
 # only accepts .ico anyway.
-ICON_PATH = Path(__file__).resolve().parents[1] / "assets" / "otter.ico"
+ICON_PATH = resource_path("assets", "otter.ico")
 
 
 def main() -> None:
