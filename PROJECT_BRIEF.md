@@ -138,7 +138,7 @@ training dataset without writing pandas code every time.
 
 
 
-\## Current phase: PHASE 5 (Packaging) — part 1, the standalone Windows .exe. BUILDS SUCCESSFULLY; NEEDS CLEAN-MACHINE VERIFICATION (see "Executable build" below). Installer and licensing are separate follow-up steps, not started.
+\## Current phase: PHASE 5 (Packaging) — parts 1 and 2 done: the standalone .exe and the Windows installer. BUILDS AND INSTALLS; STILL NEEDS CLEAN-MACHINE VERIFICATION (see "Executable build" and "Installer" below). Licensing is a separate follow-up step, not started.
 
 Built:
 
@@ -367,6 +367,52 @@ Verified only on a machine that has Python, the venv and Chrome. A clean Windows
 \- **Onefile costs ~5-6s of startup**, every launch: the 193MB archive is extracted to a temp directory each time (measured: 11.4/11.5/11.7s frozen vs 5.3/6.3s from source, for the same work). `onedir` removes that and is probably what the installer step wants — it is a one-line change in the .spec.
 \- **scripts/job\_cap.py works against the frozen .exe** (it CreateProcess's an arbitrary command line, so freezing is irrelevant to it). Verified both directions: 3072MB cap → completes, peak 1529.7 MiB; 400MB cap → allocations refused by the OS, exit code 1 at peak 373.5 MiB. job\_cap itself is a dev/diagnostics script and is NOT bundled into the .exe.
 \- The .exe is unsigned and ~193MB.
+
+\## Installer (Phase 5, part 2)
+
+Design spec: docs/superpowers/specs/2026-08-31-windows-installer-design.md.
+
+\### Build command
+
+```
+python scripts/build_release.py
+```
+
+Runs the whole pipeline: generates build/version\_info.txt from `ml\_data\_view.\_\_version\_\_`, PyInstaller (onedir), then Inno Setup. Produces `dist/MLDatasetProfiler/` (571 MB) and `dist/MLDatasetProfiler-Setup-0.1.0.exe` (164 MB). Requires Inno Setup 6 (`winget install JRSoftware.InnoSetup`); the script fails with that exact command if it is missing rather than leaving a dist/ that looks finished.
+
+\### onefile -> onedir was the biggest single change
+
+onefile unpacked ~193MB to a temp directory on EVERY launch. Measured, same 12 self-test checks: **11.4/11.5/11.7s onefile vs 5.6/5.9/5.6s onedir**, against a 5.3-6.3s from-source baseline — so extraction overhead went from ~6s to essentially zero. The installed app puts a window on screen **1.0s** after clicking its Start Menu shortcut. No amount of installer polish survives a 6-second wait, so this came first.
+
+`sys.\_MEIPASS` is still set under onedir (pointing at `\_internal/`), so resources.resource\_path() needed no change, and the frozen self-test still passes 12/12 from the onedir build.
+
+\### Version metadata (new)
+
+The project had no version string, so Properties > Details on the .exe was blank. `ml\_data\_view.\_\_version\_\_` is now the single source; the Win32 VERSIONINFO resource and the installer's AppVersion both derive from it, and tests/test\_version.py asserts they agree. Version drift between an executable and the installer shipping it is the classic packaging bug.
+
+\### What the install actually does
+
+\- Per-user to `%LOCALAPPDATA%\Programs\MLDatasetProfiler` — `PrivilegesRequired=lowest`, **no UAC prompt at any point**. Consequence, accepted: installed for the current user only.
+\- Full classic seven-screen wizard: Welcome, Destination (Browse + disk space), Start Menu folder, Additional Tasks, Ready to Install summary, progress, Finish. An earlier draft specced a three-screen wizard with no directory page, reasoning from Claude Desktop; that was wrong for software people buy and install deliberately.
+\- Destination page checks the chosen folder is writable and says so on that page, since Setup runs unelevated and browsing to Program Files would otherwise fail partway through the copy.
+\- Start Menu entry + uninstaller shortcut; desktop icon opt-in.
+\- Add/Remove Programs entry, verified present: DisplayName "ML Dataset Profiler", DisplayVersion 0.1.0, Publisher, InstallLocation, EstimatedSize, working UninstallString.
+\- Stable `AppId` GUID so a newer Setup.exe upgrades in place. `CloseApplications=yes` (Restart Manager) so an upgrade over a running instance offers to close it — deliberately not AppMutex, which would mean adding a mutex to main.py for the installer's benefit.
+\- **Uninstall leaves `%APPDATA%\MLDatasetProfiler` alone.** Settings, saved searches and the audit log are the user's data; an audit log exists precisely so it survives. There is no [UninstallDelete] section, and a test asserts there never is one.
+
+\### UNSIGNED — the remaining gap
+
+No code-signing certificate, so `SignTool=` sits commented in the .iss. Windows SmartScreen shows "Windows protected your PC — Unknown publisher" on first run and the user must click More info > Run anyway. **No installer setting closes this**; it needs a certificate. OV (~$200-400/yr, warning fades as install reputation accrues) or EV (~$400-600/yr, trusted immediately, hardware token or cloud HSM). Azure Trusted Signing is ~$10/mo but restricted to US/CA organisations 3+ years old.
+
+\### Verified here vs still needing a clean machine
+
+Verified on the dev machine: the wizard runs through all seven screens; files land in `%LOCALAPPDATA%\Programs\MLDatasetProfiler` (5,657 files, 577 MB); Start Menu and Add/Remove Programs entries are correct; the app launches from its Start Menu shortcut in 1.0s with the otter icon; the frozen self-test passes 12/12 from the installed onedir tree.
+
+Still unverified, and unchanged from part 1: a machine with no Python and no Chromium browser. The clean-machine checklist under "Executable build" still applies in full, plus: does Setup.exe run on a box that has never seen it (SmartScreen), does the uninstaller remove cleanly, and does a second Setup.exe upgrade in place rather than installing beside.
+
+\### Deliberately not built
+
+Auto-update (an update feed, signed release artifacts and a background updater — and on-prem customers often forbid self-updating software), MSI/Group Policy deployment, and code signing itself.
 
 \## Explicit non-goals right now
 
