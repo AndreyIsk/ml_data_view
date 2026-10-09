@@ -1,0 +1,25 @@
+# Keep line endings identical on every machine, whatever each developer's
+# core.autocrlf happens to be set to.
+* text=auto eol=lf
+
+# Windows tooling that needs CRLF to parse its own input.
+*.iss text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Never touched by line-ending conversion.
+*.png binary
+*.ico binary
+*.jpg binary
+*.gif binary
+*.pdf binary
+*.parquet binary
+*.arrow binary
+*.feather binary
+
+# Vendored, and not worth reading in a diff or counting as our code.
+ml_data_view/frontend/plotly.min.js linguist-vendored
+
+# The architecture reference is documentation, not a language sample.
+docs/** linguist-documentation

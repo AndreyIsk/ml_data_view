@@ -1,18 +1,43 @@
-.venv/
+# --- Python ---------------------------------------------------------
 __pycache__/
 *.pyc
-.pytest_cache/
 *.egg-info/
-sample_data/
+.venv/
+venv/
+env/
 
-# Temporary checkpoint log from the folder-open OOM crash investigation
-# (ml_data_view/checkpoint_log.py) — not meant to be committed.
-folder_open_diagnostics.log
+# --- Test and tooling caches ----------------------------------------
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
 
-# Local test dataset (~13GB of real Criteo parquet). Never commit data.
-criteo/
+# --- Editors and local tool state -----------------------------------
+.idea/
+.claude/
+.DS_Store
+Thumbs.db
 
-# PyInstaller build output (Phase 5) — ~400MB, rebuilt from MLDatasetProfiler.spec
+# VS Code: the committed run/debug setup is shared, everything else is
+# per-machine.
+.vscode/*
+!.vscode/settings.json
+!.vscode/launch.json
+!.vscode/extensions.json
+
+# --- Build output ---------------------------------------------------
+# PyInstaller + Inno Setup, ~570MB, rebuilt from MLDatasetProfiler.spec
+# via scripts/build_release.py.
 build/
 dist/
 *.manifest
+
+# --- Local data and diagnostics -------------------------------------
+# Never commit datasets. sample_data/ holds local scratch fixtures;
+# criteo/ is ~13GB of real Criteo parquet used for scale testing.
+sample_data/
+criteo/
+
+# Diagnostic logs (ml_data_view/checkpoint_log.py and friends).
+*.log
