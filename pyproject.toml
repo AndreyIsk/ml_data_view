@@ -65,9 +65,9 @@ build = [
 ml-dataset-profiler = "ml_data_view.main:main"
 
 [project.urls]
-Homepage = "https://github.com/AndreyIsk/ml-dataset-profiler"
-Source = "https://github.com/AndreyIsk/ml-dataset-profiler"
-Issues = "https://github.com/AndreyIsk/ml-dataset-profiler/issues"
+Homepage = "https://github.com/AndreyIsk/ml_data_view"
+Source = "https://github.com/AndreyIsk/ml_data_view"
+Issues = "https://github.com/AndreyIsk/ml_data_view/issues"
 
 # The app ships as a PyInstaller bundle, not a wheel -- see
 # MLDatasetProfiler.spec. This section exists so an editable install

@@ -6,7 +6,7 @@ folder tree of them — and get the schema, null patterns, class balance,
 embedding projections, media previews and time-series health checks without
 writing any pandas.
 
-[![CI](https://github.com/AndreyIsk/ml-dataset-profiler/actions/workflows/ci.yml/badge.svg)](https://github.com/AndreyIsk/ml-dataset-profiler/actions/workflows/ci.yml)
+[![CI](https://github.com/AndreyIsk/ml_data_view/actions/workflows/ci.yml/badge.svg)](https://github.com/AndreyIsk/ml_data_view/actions/workflows/ci.yml)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/downloads/)
 [![Platform](https://img.shields.io/badge/platform-Windows-lightgrey)](#requirements)
 [![License](https://img.shields.io/badge/license-proprietary-red)](LICENSE)
@@ -62,8 +62,8 @@ For how any of this works, see [`docs/architecture.md`](docs/architecture.md).
 ## Quick start
 
 ```bash
-git clone https://github.com/AndreyIsk/ml-dataset-profiler.git
-cd ml-dataset-profiler
+git clone https://github.com/AndreyIsk/ml_data_view.git
+cd ml_data_view
 
 python -m venv .venv
 .venv\Scripts\activate          # Windows
