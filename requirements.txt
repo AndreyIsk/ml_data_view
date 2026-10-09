@@ -1,14 +1,11 @@
-polars>=1.44  # lazy/streaming data loading relies on Expr.hist() and collect(engine=...); untested below this
-pyarrow>=15.0
-pywebview>=5.0
-numpy>=1.26
-scikit-learn>=1.4
-Pillow>=10.0
-pytest>=8.0
-reportlab>=5.0
-plotly>=6.1.1
-kaleido>=1.3
-psutil>=5.9  # load_stats.py: peak working set for the stat line; jobs.py: the default memory ceiling (half of RAM)
-pywin32>=306  # ml_data_view/jobs.py: the Windows Job Object memory ceiling every background job runs under
-watchdog>=4.0  # ml_data_view/folder_watcher.py: filesystem events for the watched folder
-pypdf>=4.0  # tests only: assert PDF page count / header-footer placement
+# The dependency list lives in pyproject.toml. Keeping a second copy here
+# is how the two drift apart, so this file only points at it.
+#
+# It is kept so that `pip install -r requirements.txt` -- and the IDEs that
+# go looking for it -- still produce a working environment. The line below
+# installs the project in editable mode together with its test
+# dependencies.
+#
+# For a reproducible release build, install requirements-lock.txt instead:
+# see docs/architecture.md, "Executable build".
+-e .[dev]

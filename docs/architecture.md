@@ -163,7 +163,7 @@ Status: **builds successfully; needs clean-machine verification.** Everything be
 
 Output: `dist/MLDatasetProfiler.exe` (~193MB, onefile, windowed) and `dist/MLDatasetProfiler-selftest.exe` (same bundle, console). `build/` and `dist/` are gitignored; the .spec is committed so the build is reproducible.
 
-- requirements-lock.txt pins every package with `==` (requirements.txt uses `>=` and would resolve newer ones). tests/test_resources.py fails if any line loses its pin.
+- requirements-lock.txt pins every package with `==` (pyproject.toml uses `>=` and would resolve newer ones). tests/test_resources.py fails if any line loses its pin.
 
 ### How the frozen build is verified at all
 

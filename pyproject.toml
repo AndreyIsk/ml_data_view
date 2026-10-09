@@ -1,0 +1,84 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ml-dataset-profiler"
+version = "0.1.0"
+description = "Desktop profiler for ML training datasets: schema, null patterns, class balance, embedding projections and time-series health over parquet/arrow/CSV folders larger than RAM."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+authors = [{ name = "Andrey Isakov" }]
+keywords = ["machine-learning", "dataset", "profiling", "parquet", "polars", "data-quality"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Win32 (MS Windows)",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: Other/Proprietary License",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+]
+
+dependencies = [
+    # Lazy/streaming scans rely on Expr.hist() and collect(engine=...);
+    # untested below this.
+    "polars>=1.44",
+    "pyarrow>=15.0",
+    "pywebview>=5.0",
+    "numpy>=1.26",
+    "scikit-learn>=1.4",
+    "Pillow>=10.0",
+    "reportlab>=5.0",
+    "plotly>=6.1.1",
+    "kaleido>=1.3",
+    # load_stats.py: peak working set for the stat line.
+    # jobs.py: the default memory ceiling (half of RAM).
+    "psutil>=5.9",
+    # folder_watcher.py: filesystem events for the watched folder.
+    "watchdog>=4.0",
+    # jobs.py: the Windows Job Object memory ceiling every background job
+    # runs under. Absent elsewhere, where jobs.py degrades to an
+    # unenforced ceiling -- see docs/architecture.md, "Background job
+    # runner".
+    "pywin32>=306; sys_platform == 'win32'",
+]
+
+[project.optional-dependencies]
+# Test-only: pypdf asserts PDF page count and header/footer placement.
+dev = [
+    "pytest>=8.0",
+    "pypdf>=4.0",
+]
+# Building the standalone .exe and the Windows installer. Prefer
+# requirements-lock.txt for a release build -- see docs/architecture.md,
+# "Executable build".
+build = [
+    "pyinstaller>=6.0",
+]
+
+[project.scripts]
+ml-dataset-profiler = "ml_data_view.main:main"
+
+[project.urls]
+Homepage = "https://github.com/AndreyIsk/ml-dataset-profiler"
+Source = "https://github.com/AndreyIsk/ml-dataset-profiler"
+Issues = "https://github.com/AndreyIsk/ml-dataset-profiler/issues"
+
+# The app ships as a PyInstaller bundle, not a wheel -- see
+# MLDatasetProfiler.spec. This section exists so an editable install
+# (`pip install -e .`) gives IDEs a resolvable project and puts the
+# dependencies in one place.
+[tool.setuptools]
+packages = ["ml_data_view"]
+
+[tool.setuptools.package-data]
+ml_data_view = ["frontend/*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
