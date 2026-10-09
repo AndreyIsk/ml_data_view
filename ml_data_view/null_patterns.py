@@ -27,9 +27,19 @@ obvious implementation — is exactly what this avoids.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 import polars as pl
+
+
+class CoNullCache(Protocol):
+    """Persistent per-file co-null counts. file_profile.CachedCoNulls is
+    the implementation; the protocol is here so null_patterns does not have
+    to import the cache to accept one."""
+
+    def get(self, file: Path, anchor: str, other: str) -> int | None: ...
+
+    def put(self, file: Path, anchor: str, counts: dict[str, int]) -> None: ...
 
 # Null counts this close (relative to the larger) are treated as possibly
 # the same pattern. Real upstream causes rarely produce exactly equal
@@ -76,6 +86,7 @@ def _co_null_counts(
     others: list[str],
     files: list[Path] | None,
     predicate: pl.Expr | None = None,
+    co_null_cache: CoNullCache | None = None,
 ) -> dict[str, int]:
     """Rows where `anchor` and each of `others` are BOTH null.
 
@@ -84,21 +95,47 @@ def _co_null_counts(
     file. Querying the concatenated frame instead grows with file count
     (~28-42MB per file, measured), the pattern that repeatedly exhausted
     memory elsewhere in this codebase.
+
+    `co_null_cache` makes that per-file half persistent. This is the one
+    part of correlated missingness that caches: which PAIRS to check
+    depends on merged null counts and so cannot be known file by file, but
+    a chosen pair's count is a plain sum over files. Only the pairs a file
+    has no cached answer for reach a query, so re-opening an unchanged
+    folder reads nothing here. A filtered build never caches — the counts
+    would describe a different set of rows.
     """
     anchor_null = pl.col(anchor).is_null()
     totals = dict.fromkeys(others, 0)
-    sources = [pl.scan_parquet(file) for file in files] if files else [lf]
+    usable_cache = co_null_cache if (files and predicate is None) else None
+    sources: list[tuple[Path | None, pl.LazyFrame]] = (
+        [(Path(file), pl.scan_parquet(file)) for file in files] if files else [(None, lf)]
+    )
     if predicate is not None:
-        sources = [source.filter(predicate) for source in sources]
+        sources = [(file, source.filter(predicate)) for file, source in sources]
 
-    for source in sources:
-        for start in range(0, len(others), MAX_EXPRS_PER_QUERY):
-            batch = others[start : start + MAX_EXPRS_PER_QUERY]
+    for file, source in sources:
+        wanted = list(others)
+        if usable_cache is not None and file is not None:
+            remaining = []
+            for name in wanted:
+                cached = usable_cache.get(file, anchor, name)
+                if cached is None:
+                    remaining.append(name)
+                else:
+                    totals[name] += cached
+            wanted = remaining
+        computed: dict[str, int] = {}
+        for start in range(0, len(wanted), MAX_EXPRS_PER_QUERY):
+            batch = wanted[start : start + MAX_EXPRS_PER_QUERY]
             result = source.select(
                 [(anchor_null & pl.col(name).is_null()).sum().alias(name) for name in batch]
             ).collect(engine="streaming")
             for name in batch:
-                totals[name] += int(result[0, name])
+                count = int(result[0, name])
+                computed[name] = count
+                totals[name] += count
+        if usable_cache is not None and file is not None and computed:
+            usable_cache.put(file, anchor, computed)
     return totals
 
 
@@ -108,6 +145,7 @@ def _verify_group(
     null_counts: dict[str, int],
     files: list[Path] | None = None,
     predicate: pl.Expr | None = None,
+    co_null_cache: CoNullCache | None = None,
 ) -> dict[str, Any] | None:
     """Pass 2: confirm the candidates really are null on the same rows.
 
@@ -118,7 +156,7 @@ def _verify_group(
     contained inside one with many.
     """
     anchor, others = group[0], group[1:]
-    co_null = _co_null_counts(lf, anchor, others, files, predicate)
+    co_null = _co_null_counts(lf, anchor, others, files, predicate, co_null_cache)
 
     confirmed = [anchor]
     overlaps = []
@@ -146,17 +184,28 @@ def correlated_missingness(
     total_rows: int,
     files: list[Path] | None = None,
     predicate: pl.Expr | None = None,
+    co_null_cache: CoNullCache | None = None,
 ) -> list[dict[str, Any]]:
     """Groups of 2+ columns whose nulls co-occur near-perfectly.
 
     `null_counts` is reused from the schema table rather than recomputed —
     it is the whole of pass 1. Returns [] when nothing qualifies.
+
+    `co_null_cache`, when given, persists pass 2's per-file counts so a
+    re-opened folder does not pay for them again (see _co_null_counts).
     """
     if total_rows <= 0:
         return []
     groups = []
     for candidate in _candidate_groups(null_counts, total_rows):
-        verified = _verify_group(lf, candidate, null_counts, files=files, predicate=predicate)
+        verified = _verify_group(
+            lf,
+            candidate,
+            null_counts,
+            files=files,
+            predicate=predicate,
+            co_null_cache=co_null_cache,
+        )
         if verified is not None:
             groups.append(verified)
     return groups

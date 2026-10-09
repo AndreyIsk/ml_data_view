@@ -170,5 +170,14 @@ def test_the_lockfile_pins_exact_versions():
 def test_the_lockfile_covers_the_packages_the_build_depends_on():
     lock = (resources.PROJECT_ROOT / "requirements-lock.txt").read_text(encoding="utf-8").lower()
 
-    for package in ["polars", "pyarrow", "scikit-learn", "plotly", "kaleido", "choreographer", "pywebview"]:
+    for package in [
+        "polars",
+        "pyarrow",
+        "scikit-learn",
+        "plotly",
+        "kaleido",
+        "choreographer",
+        "pywebview",
+        "watchdog",
+    ]:
         assert f"{package}==" in lock, f"{package} missing from the lockfile"

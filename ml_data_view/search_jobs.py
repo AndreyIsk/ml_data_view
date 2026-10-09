@@ -33,9 +33,15 @@ class SearchCountJob(BackgroundJob):
     "not counted" rather than a number that is quietly too low.
     """
 
-    def __init__(self, files: list[Path], predicate: pl.Expr) -> None:
+    def __init__(
+        self, files: list[Path], predicate: pl.Expr, identity: dict | None = None
+    ) -> None:
         super().__init__(files)
         self._predicate = predicate
+        # Per-file derived-column values for a structured folder, so a
+        # count of "rows in recording X" scans one file at a time like
+        # every other count rather than querying the concat.
+        self._identity = identity
 
     def _work(self) -> int:
         self._update(stage="counting", label="Counting matches…")
@@ -44,6 +50,7 @@ class SearchCountJob(BackgroundJob):
             self._predicate,
             on_progress=lambda i, p: self._note_file(i, p, "Counting matches"),
             should_cancel=self._cancel.is_set,
+            identity=self._identity,
         )
 
     def _final_label(self, cancelled: bool) -> str:
@@ -64,11 +71,13 @@ class SearchExportJob(BackgroundJob):
         predicate: pl.Expr,
         columns: list[str] | None,
         out_path: str | Path,
+        identity: dict | None = None,
     ) -> None:
         super().__init__(files)
         self._predicate = predicate
         self._columns = columns
         self._out_path = Path(out_path)
+        self._identity = identity
 
     def _work(self) -> str:
         self._update(stage="exporting", label="Exporting matches…")
@@ -79,6 +88,7 @@ class SearchExportJob(BackgroundJob):
             self._out_path,
             on_progress=lambda i, p: self._note_file(i, p, "Exporting matches"),
             should_cancel=self._cancel.is_set,
+            identity=self._identity,
         )
         return str(path)
 

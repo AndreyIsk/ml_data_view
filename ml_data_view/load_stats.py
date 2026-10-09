@@ -85,11 +85,28 @@ def _plural(count: int, noun: str) -> str:
     return f"{count:,} {noun}" if count == 1 else f"{count:,} {noun}s"
 
 
+def format_cache_clause(files_scanned: int | None, files_from_cache: int | None) -> str | None:
+    """"12 of 279 files profiled, 267 from cache", or None when there is
+    nothing worth saying.
+
+    Omitted entirely when NOTHING came from the cache — on a first open
+    "279 of 279 files profiled, 0 from cache" is a sentence about an
+    absence, and the ordinary "across 279 files" already says it better.
+    """
+    if not files_from_cache:
+        return None
+    total = (files_scanned or 0) + files_from_cache
+    return f"{files_scanned or 0} of {total:,} files profiled, {files_from_cache:,} from cache"
+
+
 def format_stat_line(
     row_count: int | None,
     file_count: int | None,
     elapsed_seconds: float | None,
     peak_bytes: int | None,
+    ceiling_bytes: int | None = None,
+    files_scanned: int | None = None,
+    files_from_cache: int | None = None,
 ) -> str | None:
     """The whole line, or None when no part of it is known.
 
@@ -97,11 +114,26 @@ def format_stat_line(
     metadata row count (folder_loader.py reports it as unknown rather than
     forcing a full scan), and peak memory is unavailable off Windows. Only
     None means unknown: a genuinely empty dataset still reads "0 rows".
+
+    `ceiling_bytes` changes what the memory clause MEANS, which is why it
+    changes how it reads. Without it the figure is this process's
+    all-time high-water mark, hence "(process)" — Windows offers no way to
+    reset it, so a small file opened after a big folder would otherwise
+    look like it had used the folder's memory. With it, the load ran in a
+    capped worker subprocess (jobs.py) and the figure is that ONE job's
+    own peak, measured by the Job Object against the ceiling it ran under:
+    "peak 1.4 GB of 8 GB ceiling". Different number, different question
+    answered, so it does not carry the same qualifier.
     """
+    cache_clause = format_cache_clause(files_scanned, files_from_cache)
+
     subjects = []
     if row_count is not None:
         subjects.append(_plural(row_count, "row"))
-    if file_count is not None:
+    # The cache clause already names the file count, and names it more
+    # usefully — "across 279 files" beside "12 of 279 files profiled" makes
+    # a reader check whether the two numbers are the same number.
+    if file_count is not None and cache_clause is None:
         subjects.append(_plural(file_count, "file"))
 
     profiled = ""
@@ -112,10 +144,18 @@ def format_stat_line(
     elif elapsed_seconds is not None:
         profiled = f"Profiled in {format_duration(elapsed_seconds)}"
 
+    if cache_clause:
+        profiled = f"{profiled} — {cache_clause}" if profiled else cache_clause
+
     if peak_bytes is None:
         return profiled or None
 
-    memory = f"peak memory {format_peak_memory(peak_bytes)} (process)"
+    if ceiling_bytes:
+        from ml_data_view.jobs import format_gb
+
+        memory = f"peak {format_gb(peak_bytes)} of {format_gb(ceiling_bytes)} ceiling"
+    else:
+        memory = f"peak memory {format_peak_memory(peak_bytes)} (process)"
     if not profiled:
         # Only the first character — .capitalize() would lowercase the
         # unit suffix ("GiB" -> "gib").
@@ -131,6 +171,9 @@ def build_load_stats(
     file_count: int | None,
     elapsed_seconds: float | None,
     peak_bytes: int | None | object = _UNSET,
+    ceiling_bytes: int | None = None,
+    files_scanned: int | None = None,
+    files_from_cache: int | None = None,
 ) -> dict[str, Any]:
     """The payload the frontend renders: the ready-made `line` plus the
     raw parts behind it.
@@ -144,9 +187,20 @@ def build_load_stats(
     if peak_bytes is _UNSET:
         peak_bytes = peak_memory_bytes()
     return {
-        "line": format_stat_line(row_count, file_count, elapsed_seconds, peak_bytes),
+        "line": format_stat_line(
+            row_count,
+            file_count,
+            elapsed_seconds,
+            peak_bytes,
+            ceiling_bytes,
+            files_scanned,
+            files_from_cache,
+        ),
         "row_count": row_count,
         "file_count": file_count,
         "elapsed_seconds": elapsed_seconds,
         "peak_bytes": peak_bytes,
+        "ceiling_bytes": ceiling_bytes,
+        "files_scanned": files_scanned,
+        "files_from_cache": files_from_cache,
     }

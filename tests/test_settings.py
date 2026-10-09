@@ -1,8 +1,11 @@
+from ml_data_view.jobs import default_memory_ceiling_mb
 from ml_data_view.settings import (
     DEFAULT_BANNER_COLOR,
+    MIN_MEMORY_CEILING_MB,
     THEMES,
     AppSettings,
     load_settings,
+    resolve_memory_ceiling_mb,
     save_settings,
     settings_file_path,
 )
@@ -155,3 +158,66 @@ def test_every_valid_theme_is_accepted(tmp_path):
     for theme in THEMES:
         save_settings(AppSettings(theme=theme), tmp_path)
         assert load_settings(tmp_path).theme == theme
+
+
+# --- memory ceiling ------------------------------------------------------
+
+
+def test_memory_ceiling_defaults_to_automatic():
+    """Stored as None rather than as a resolved number, so the default
+    follows the hardware: a settings file copied to a bigger machine, or
+    one written before more RAM was installed, must not pin an old ceiling
+    forever."""
+    assert AppSettings().memory_ceiling_mb is None
+
+
+def test_a_memory_ceiling_below_the_minimum_is_raised_to_it():
+    """Clamped, not rejected: the field is a number box, and someone who
+    types 1 wants the smallest ceiling available, not an error."""
+    assert AppSettings.from_dict({"memory_ceiling_mb": 512}).memory_ceiling_mb == (
+        MIN_MEMORY_CEILING_MB
+    )
+
+
+def test_clearing_the_memory_ceiling_returns_to_automatic():
+    assert AppSettings.from_dict({"memory_ceiling_mb": 0}).memory_ceiling_mb is None
+    assert AppSettings.from_dict({"memory_ceiling_mb": None}).memory_ceiling_mb is None
+
+
+def test_a_nonsense_memory_ceiling_falls_back_to_automatic():
+    """A hand-edited or future-version settings file must not leave the job
+    runner with a ceiling it cannot use."""
+    assert AppSettings.from_dict({"memory_ceiling_mb": "lots"}).memory_ceiling_mb is None
+
+
+def test_a_memory_ceiling_round_trips_through_the_file(tmp_path):
+    save_settings(AppSettings(memory_ceiling_mb=8192), tmp_path)
+
+    assert load_settings(tmp_path).memory_ceiling_mb == 8192
+
+
+def test_resolving_the_ceiling_prefers_the_users_choice():
+    assert resolve_memory_ceiling_mb(AppSettings(memory_ceiling_mb=8192)) == 8192
+
+
+def test_resolving_an_automatic_ceiling_uses_this_machines_default():
+    assert resolve_memory_ceiling_mb(AppSettings()) == default_memory_ceiling_mb()
+
+
+# --- timeline bounds ---------------------------------------------------
+
+
+def test_timeline_bounds_have_defaults():
+    settings = AppSettings()
+
+    assert settings.timeline_max_channels == 6
+    assert settings.timeline_max_rows == 2_000_000
+
+
+def test_timeline_bounds_round_trip_through_the_file(tmp_path):
+    save_settings(AppSettings(timeline_max_channels=2, timeline_max_rows=500_000), tmp_path)
+
+    loaded = load_settings(tmp_path)
+
+    assert loaded.timeline_max_channels == 2
+    assert loaded.timeline_max_rows == 500_000

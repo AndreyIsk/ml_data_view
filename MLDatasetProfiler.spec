@@ -72,6 +72,16 @@ _bundle("choreographer")
 _bundle("logistro")
 hiddenimports += ["orjson", "narwhals", "tenacity"]
 
+# --- folder watching --------------------------------------------------
+#
+# watchdog picks its observer at runtime from what the platform offers
+# (ReadDirectoryChangesW here, inotify/FSEvents elsewhere), so no static
+# import reaches watchdog.observers.winapi and the module graph misses the
+# whole backend. Without this the .exe builds and then silently never sees
+# a file arrive — the failure mode is a watcher that reports "Watching"
+# and never fires.
+_bundle("watchdog")
+
 # --- UI shell ---------------------------------------------------------
 #
 # pywebview picks its backend at runtime, so no static import reaches
@@ -104,10 +114,19 @@ datas += [
     ("assets", "assets"),
 ]
 
-# psutil (load_stats.py's peak_wset reading) and pywin32 are imported
-# normally, but psutil's compiled extension and pywin32's DLLs are loaded
-# late enough that they are worth naming.
+# psutil (load_stats.py's peak_wset reading, and jobs.py's default memory
+# ceiling) and pywin32 are imported normally, but psutil's compiled
+# extension and pywin32's DLLs are loaded late enough that they are worth
+# naming. pywin32 is no longer only a diagnostics dependency: win32job IS
+# the memory ceiling every background job runs under (ml_data_view/jobs.py).
 hiddenimports += ["psutil", "win32api", "win32job", "win32event", "win32process", "pywintypes"]
+
+# The worker subprocess's task registry. jobs.run_worker imports it inside
+# a function, and it is the only import of it anywhere — so if this ever
+# stopped being reachable from the module graph, every heavy operation
+# would fail in the frozen build alone, with the error visible only in a
+# temp file the parent then deletes.
+hiddenimports += ["ml_data_view.job_tasks"]
 
 # Excluded: pytest and friends are test-only, and pulling them in adds
 # tens of megabytes of nothing to the shipped .exe.

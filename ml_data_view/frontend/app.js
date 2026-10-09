@@ -92,6 +92,7 @@ async function showImageModal(column, source, rowIndex) {
 // unresponsive button with no feedback: show what's happening, and don't
 // let a second click start a second load while one is in flight.
 function showLoading(message) {
+  manualLoadInFlight = true;
   loadingMessage.textContent = message;
   loadingIndicator.classList.remove("hidden");
   openFileBtn.disabled = true;
@@ -103,6 +104,7 @@ function showLoading(message) {
 }
 
 function hideLoading() {
+  manualLoadInFlight = false;
   loadingIndicator.classList.add("hidden");
   openFileBtn.disabled = false;
 }
@@ -353,7 +355,11 @@ function renderDataset(data) {
 // `data` (the load_file()/load_folder_group() result): render it, then
 // compute and render charts + the Reports section from the same loaded
 // dataset. Returns false (having already shown the error) on any failure.
-async function finishLoadingDataset(data) {
+// `quiet` is for a watch-triggered re-profile: same work, none of the
+// foreground chrome. New data arriving is not a reason to throw a loading
+// overlay over whatever someone is reading — the jobs indicator in the top
+// strip already shows the work, with a Cancel on it.
+async function finishLoadingDataset(data, { quiet = false } = {}) {
   if (data.error) {
     showError(data.error);
     return false;
@@ -363,26 +369,40 @@ async function finishLoadingDataset(data) {
   // Chart generation runs ~0.54s per file (measured), so on a large folder
   // this is minutes — the same start-and-poll shape as the folder load,
   // rather than one blocking call behind a static spinner.
-  showLoading("Computing charts…");
-  showProgress({ stoppable: false });
+  if (!quiet) {
+    showLoading("Computing charts…");
+    showProgress({ stoppable: false });
+  }
   let chartData;
+  let state = {};
   try {
     const started = await window.pywebview.api.start_chart_build();
     if (started.error) {
       showError(started.error);
       return false;
     }
-    const state = await pollChartBuild();
+    state = await pollChartBuild();
     if (state.error) {
+      // Includes the ceiling case: the backend puts "Stopped at the N GB
+      // ceiling. Raise the limit in Settings or narrow the selection."
+      // straight into `error`, and that sentence is already the whole
+      // message — it names the limit and what to do about it.
       showError(state.error);
       return false;
     }
     chartData = state.result;
   } finally {
-    hideProgress();
+    if (!quiet) hideProgress();
   }
   if (!chartData) {
-    showError("Chart generation produced no data.");
+    // A cancelled chart build reports no result on purpose: some columns
+    // charted and others silently missing is not a dataset anyone can read.
+    // Saying which of the two happened matters — one the user did.
+    showError(
+      state.cancelled
+        ? "Chart generation was cancelled, so there are no charts to show. Re-open the dataset to try again."
+        : "Chart generation produced no data."
+    );
     return false;
   }
   await renderCharts(chartData);
@@ -391,6 +411,10 @@ async function finishLoadingDataset(data) {
   // is the earliest honest moment to run them — before it, "nothing found"
   // would mean "nothing looked".
   await runFindingsScan();
+  // After the checks, not before: the catalogue's health column is the
+  // worst severity among the findings that name each unit, so rendering
+  // it first would paint a column of "unknown" and then repaint it.
+  await renderCatalogAndFleet();
   return true;
 }
 
@@ -399,6 +423,8 @@ async function handleOpenFile() {
   if (!path) return;
 
   clearError();
+  structureNote.classList.add("hidden");
+  renderScopeBreadcrumb({ active: false });
   showLoading("Reading file…");
   try {
     const data = await window.pywebview.api.load_file(path);
@@ -507,6 +533,18 @@ async function renderColumnCharts(containerId, sectionId, charts, plotBuilder) {
     title.textContent = chart.column;
     title.title = chart.column; // native tooltip if the name is truncated
     card.appendChild(title);
+
+    // A merged top-K can under-count a category that ranked below the
+    // per-file shortlist in every file. Only ever set when that actually
+    // could have happened — a chart that says this every time teaches
+    // people to ignore it.
+    if (chart.truncated) {
+      const flag = document.createElement("p");
+      flag.className = "chart-flag";
+      flag.textContent =
+        "Counts merged from per-file shortlists — a rare category could be under-counted.";
+      card.appendChild(flag);
+    }
 
     const plotDiv = document.createElement("div");
     plotDiv.className = "chart-plot";
@@ -860,9 +898,237 @@ function renderCorrelatedMissingness(groups) {
 // folder), while re-rendering already-fetched data is instant.
 let latestChartData = null;
 
+function renderRangeExpandedNote(cacheStats) {
+  const note = document.getElementById("range-expanded-note");
+  const columns = (cacheStats && cacheStats.range_expanded_columns) || [];
+  if (!columns.length) {
+    note.classList.add("hidden");
+    note.textContent = "";
+    return;
+  }
+  note.textContent =
+    `New data widened the value range of ${columns.join(", ")}, so ` +
+    `${columns.length === 1 ? "that histogram was" : "those histograms were"} ` +
+    "rebinned across every file. Every other statistic came from the cache.";
+  note.classList.remove("hidden");
+}
+
+
+// --- Health: time-series coverage --------------------------------------
+//
+// Everything drawn here arrives already downsampled and already
+// classified: which stretches are data, which are gaps and which gaps sit
+// on a chunk boundary is decided in Python (timeseries.coverage_strip),
+// beside the checks that report the same thing. A second copy of those
+// rules here is how the chart and the finding next to it would end up
+// telling different stories.
+
+const healthEmpty = document.getElementById("health-empty");
+const healthContent = document.getElementById("health-content");
+const healthUnitSelect = document.getElementById("health-unit-select");
+const healthSummary = document.getElementById("health-summary");
+const healthChannelsNote = document.getElementById("health-channels-note");
+
+let healthPayload = null;
+
+const COVERAGE_COLORS = {
+  data: "--chart-series",
+  gap: "--chart-missing-bucket",
+  missing: "--chart-missing",
+  nan: "--chart-missing",
+  flat: "--chart-cat-2",
+};
+
+function formatSeconds(value) {
+  if (value === null || value === undefined) return "—";
+  if (value < 1) return `${(value * 1000).toFixed(0)}ms`;
+  if (value < 90) return `${value.toFixed(2)}s`;
+  const minutes = Math.floor(value / 60);
+  return `${minutes}m ${(value - minutes * 60).toFixed(1)}s`;
+}
+
+function healthStat(label, value, bad) {
+  const item = document.createElement("div");
+  item.className = bad ? "health-stat health-stat-bad" : "health-stat";
+  const text = document.createElement("span");
+  text.className = "health-stat-label";
+  text.textContent = label;
+  const number = document.createElement("span");
+  number.className = "health-stat-value";
+  number.textContent = value;
+  item.append(text, number);
+  return item;
+}
+
+function renderHealthSummary(summary) {
+  healthSummary.replaceChildren(
+    healthStat("Rows", (summary.rows || 0).toLocaleString()),
+    healthStat("Duration", formatSeconds(summary.duration)),
+    healthStat("Rate", summary.hz ? `${summary.hz.toFixed(1)} Hz` : "—"),
+    healthStat("Jitter", summary.jitter === null ? "—" : `${(summary.jitter * 100).toFixed(0)}%`),
+    healthStat(
+      "Gaps",
+      `${summary.gap_count} (${formatSeconds(summary.gap_total)})`,
+      summary.gap_count > 0
+    ),
+    healthStat("Missing chunks", summary.missing_chunks, summary.missing_chunks > 0),
+    healthStat("Overlaps", summary.overlaps, summary.overlaps > 0),
+    healthStat("Backwards steps", summary.backwards, summary.backwards > 0),
+    healthStat("Duplicate stamps", summary.duplicates, summary.duplicates > 0)
+  );
+}
+
+// A strip is a horizontal bar per segment, drawn with `base` so each one
+// starts where it belongs on the time axis. Plotly has no "timeline" trace
+// and shapes do not get hover text, so bars it is.
+function stripTraces(segments, row, labels) {
+  const byKind = new Map();
+  for (const segment of segments) {
+    const kind = segment.kind || "data";
+    if (!byKind.has(kind)) byKind.set(kind, { base: [], width: [], text: [] });
+    const group = byKind.get(kind);
+    group.base.push(segment.t0);
+    group.width.push(Math.max(segment.t1 - segment.t0, 0));
+    group.text.push(`${labels[kind] || kind}: ${formatSeconds(segment.t1 - segment.t0)}`);
+  }
+  return Array.from(byKind.entries()).map(([kind, group]) => ({
+    type: "bar",
+    orientation: "h",
+    y: group.base.map(() => row),
+    x: group.width,
+    base: group.base,
+    name: labels[kind] || kind,
+    marker: { color: themeColor(COVERAGE_COLORS[kind] || "--chart-series") },
+    hovertemplate: "%{text}<extra></extra>",
+    text: group.text,
+  }));
+}
+
+async function renderHealthCoverage(charts) {
+  const labels = { data: "Data", gap: "Gap", missing: "Missing chunk" };
+  const traces = stripTraces(charts.coverage || [], "coverage", labels);
+  await drawPlot(
+    document.getElementById("health-coverage"),
+    traces,
+    {
+      ...barLayout({ l: 80, r: 16, t: 8, b: 36 }),
+      barmode: "overlay",
+      height: 110,
+      showlegend: true,
+      xaxis: { title: "time", gridcolor: themeColor("--chart-gridline") },
+      yaxis: { automargin: true },
+    },
+    { displayModeBar: false, responsive: true }
+  );
+}
+
+async function renderHealthDt(charts) {
+  const points = charts.dt || [];
+  const traces = [
+    {
+      type: "scatter",
+      mode: "lines",
+      x: points.map((p) => p.t),
+      y: points.map((p) => p.dt_median),
+      name: "median",
+      line: { color: themeColor("--chart-series") },
+    },
+    {
+      type: "scatter",
+      mode: "lines",
+      x: points.map((p) => p.t),
+      y: points.map((p) => p.dt_max),
+      name: "max",
+      line: { color: themeColor("--chart-cat-2"), dash: "dot" },
+    },
+  ];
+  await drawPlot(
+    document.getElementById("health-dt"),
+    traces,
+    {
+      ...barLayout({ l: 64, r: 16, t: 8, b: 36 }),
+      height: 220,
+      showlegend: true,
+      xaxis: { title: "time", gridcolor: themeColor("--chart-gridline") },
+      yaxis: { title: "interval (s)", gridcolor: themeColor("--chart-gridline") },
+    },
+    { displayModeBar: false, responsive: true }
+  );
+}
+
+async function renderHealthChannels(charts, summary) {
+  const rows = charts.channels || [];
+  const div = document.getElementById("health-channels");
+  if (!rows.length) {
+    healthChannelsNote.textContent =
+      "No channel had a missing or flatlined stretch worth marking in this recording.";
+    untrackPlot(div);
+    div.innerHTML = "";
+    return;
+  }
+  healthChannelsNote.textContent =
+    "Missing and flatlined stretches per channel. Segment lengths are measured in rows " +
+    `and drawn using this recording's median interval (${formatSeconds(summary.dt_median)}), ` +
+    "so their width is indicative rather than exact.";
+  const labels = { nan: "Missing", flat: "Flatline" };
+  const traces = [];
+  for (const row of rows) {
+    traces.push(...stripTraces(row.segments, row.column, labels));
+  }
+  await drawPlot(
+    div,
+    traces,
+    {
+      ...barLayout({ l: 120, r: 16, t: 8, b: 36 }),
+      barmode: "overlay",
+      height: Math.max(140, rows.length * 34 + 60),
+      showlegend: true,
+      xaxis: { title: "time", gridcolor: themeColor("--chart-gridline") },
+      yaxis: { automargin: true },
+    },
+    { displayModeBar: false, responsive: true }
+  );
+}
+
+async function renderHealthUnit(unitId) {
+  const charts = (healthPayload.charts || {})[unitId];
+  if (!charts) return;
+  renderHealthSummary(charts.summary);
+  await renderHealthCoverage(charts);
+  await renderHealthDt(charts);
+  await renderHealthChannels(charts, charts.summary);
+  // The channel timeline is the same unit's data, at whatever resolution
+  // the window needs — see timeline.js.
+  await renderTimeline(unitId);
+}
+
+async function renderHealth(timeseries) {
+  healthPayload = timeseries;
+  const units = timeseries ? Object.keys(timeseries.charts || {}) : [];
+  if (!units.length) {
+    healthContent.classList.add("hidden");
+    healthEmpty.classList.remove("hidden");
+    return;
+  }
+  healthEmpty.classList.add("hidden");
+  healthContent.classList.remove("hidden");
+
+  healthUnitSelect.replaceChildren();
+  for (const unitId of units.sort()) {
+    const option = document.createElement("option");
+    option.value = unitId;
+    option.textContent = unitId;
+    healthUnitSelect.appendChild(option);
+  }
+  await renderHealthUnit(units[0]);
+}
+
+healthUnitSelect.addEventListener("change", () => renderHealthUnit(healthUnitSelect.value));
+
 async function renderCharts(chartData) {
   latestChartData = chartData;
   document.querySelectorAll(".chart-content").forEach((el) => el.classList.remove("hidden"));
+  renderRangeExpandedNote(chartData.cache_stats);
   renderCorrelatedMissingness(chartData.correlated_missingness);
   await renderNullHeatmap(chartData.null_heatmap);
   await renderColumnCharts(
@@ -885,6 +1151,7 @@ async function renderCharts(chartData) {
   );
   await renderEmbeddingProjections(chartData.embedding_projections);
   renderImagePreviews(chartData.image_previews);
+  await renderHealth(chartData.timeseries);
 }
 
 // --- Left-hand nav: pure layout switching, no effect on data/chart state ---
@@ -912,6 +1179,236 @@ for (const button of navButtons) {
 
 // --- Settings: classification banner + audit log ---
 // Settings live entirely on the Python side (ml_data_view/settings.py) —
+// --- Jobs indicator ---------------------------------------------------
+//
+// Every heavy operation runs in a capped worker subprocess (jobs.py), so
+// the main thread is never the thing doing the work — it only asks. This
+// poll is the whole reason that stays true in practice: list_jobs() reads
+// each job's last published progress snapshot and returns immediately, so
+// no amount of work inside a job can make the window stop answering.
+//
+// One row per running job with its own Cancel, rather than a single
+// aggregate indicator: two jobs can overlap (a comparison while charts
+// build), and "cancel the background work" is not an offer anyone can act
+// on confidently when they cannot see what it would cancel.
+const jobsIndicator = document.getElementById("jobs-indicator");
+
+// 500ms, not the 200ms the load/chart bars poll at: those drive a progress
+// bar the user is actively watching, this one is peripheral, and it runs
+// the whole time the app is open rather than only during a load.
+const JOBS_POLL_MS = 500;
+
+function renderJobs(jobs) {
+  if (!jobs || jobs.length === 0) {
+    jobsIndicator.classList.add("hidden");
+    jobsIndicator.replaceChildren();
+    return;
+  }
+
+  const rows = jobs.map((job) => {
+    const row = document.createElement("div");
+    row.className = "job-row";
+
+    const title = document.createElement("span");
+    title.className = "job-title";
+    title.textContent = job.title;
+    row.appendChild(title);
+
+    const bar = document.createElement("progress");
+    bar.max = 100;
+    bar.value = Math.round((job.fraction || 0) * 100);
+    row.appendChild(bar);
+
+    const detail = document.createElement("span");
+    detail.className = "job-detail";
+    detail.textContent = jobDetail(job);
+    detail.title = job.label || "";
+    row.appendChild(detail);
+
+    // Only when there is one. An ETA that is not yet estimable is left out
+    // entirely rather than shown as a dash — the same rule the load stat
+    // line follows for every figure it does not know.
+    if (job.eta_label) {
+      const eta = document.createElement("span");
+      eta.className = "job-eta";
+      eta.textContent = job.eta_label;
+      row.appendChild(eta);
+    }
+
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "btn-stop";
+    cancel.textContent = job.cancelling ? "Stopping…" : "Cancel";
+    cancel.disabled = Boolean(job.cancelling);
+    cancel.addEventListener("click", async () => {
+      cancel.disabled = true;
+      cancel.textContent = "Stopping…";
+      await window.pywebview.api.cancel_job(job.id);
+    });
+    row.appendChild(cancel);
+    return row;
+  });
+
+  jobsIndicator.replaceChildren(...rows);
+  jobsIndicator.classList.remove("hidden");
+}
+
+// Files first when the job counts them, because that is the unit the user
+// chose ("I opened 250 files"); rows only as a second clause, since a row
+// count is a number they never picked. Neither is invented: a job that
+// knows neither falls back to naming the step it is on.
+function jobDetail(job) {
+  const parts = [];
+  if (job.files_total) parts.push(job.files_done + "/" + job.files_total + " files");
+  if (job.rows_done) parts.push(job.rows_done.toLocaleString() + " rows");
+  if (parts.length === 0) return job.label || "";
+  return parts.join(" · ");
+}
+
+async function pollJobs() {
+  try {
+    const state = await window.pywebview.api.list_jobs();
+    renderJobs(state.jobs);
+  } catch (err) {
+    // A failed poll is not worth an error banner: the next one is 500ms
+    // away, and the jobs are unaffected by whether anyone asked about them.
+    jobsIndicator.classList.add("hidden");
+  }
+  setTimeout(pollJobs, JOBS_POLL_MS);
+}
+
+// --- Folder watching ---------------------------------------------------
+//
+// The backend watches; this file decides when to act on it. Nothing is
+// pushed from Python — the same poll that drives the jobs indicator asks
+// whether a re-profile is wanted, so new data can never interrupt what
+// someone is in the middle of. It arrives as a corner toast and a changed
+// set of charts, never as a dialog or a stolen focus.
+const watchIndicator = document.getElementById("watch-indicator");
+const watchLabel = document.getElementById("watch-label");
+const watchToggleBtn = document.getElementById("watch-toggle-btn");
+const watchToast = document.getElementById("watch-toast");
+
+// Long enough to read a sentence, short enough not to linger over the
+// charts it is describing.
+const WATCH_TOAST_MS = 9000;
+let watchToastTimer = null;
+// Guards against a second re-profile starting on top of one already
+// running — they share the backend's folder-load job, and the poll fires
+// every 500ms while a re-profile takes rather longer than that.
+let reprofileInFlight = false;
+// A manual Open File/Open Folder owns the foreground. A watch re-profile
+// that started mid-open would fight it for the same job slot.
+let manualLoadInFlight = false;
+
+function renderWatchIndicator(status) {
+  if (!status || !status.watching) {
+    watchIndicator.classList.add("hidden");
+    return;
+  }
+  const folder = (status.folder || "").split(/[\\/]/).filter(Boolean).pop() || status.folder;
+  const settling = (status.pending || []).length;
+  let text = status.paused ? `Paused — ${folder}` : `Watching ${folder}`;
+  if (settling) {
+    // "Still being written" is the honest description of a file whose size
+    // has not settled, and it is the state a stalled pipeline sits in — so
+    // it is surfaced rather than hidden behind a spinner.
+    text += settling === 1
+      ? " · 1 file still being written"
+      : ` · ${settling} files still being written`;
+  }
+  watchLabel.textContent = text;
+  watchLabel.title = status.folder || "";
+  watchToggleBtn.textContent = status.paused ? "Resume" : "Pause";
+  watchIndicator.classList.toggle("watch-paused", Boolean(status.paused));
+  watchIndicator.classList.remove("hidden");
+}
+
+watchToggleBtn.addEventListener("click", async () => {
+  watchToggleBtn.disabled = true;
+  try {
+    const status = watchToggleBtn.textContent === "Pause"
+      ? await window.pywebview.api.pause_watch()
+      : await window.pywebview.api.resume_watch();
+    if (!status.error) renderWatchIndicator(status);
+  } finally {
+    watchToggleBtn.disabled = false;
+  }
+});
+
+function showWatchToast(message) {
+  if (!message) return;
+  watchToast.textContent = message;
+  watchToast.classList.remove("hidden", "watch-toast-fading");
+  if (watchToastTimer) clearTimeout(watchToastTimer);
+  watchToastTimer = setTimeout(() => {
+    watchToast.classList.add("watch-toast-fading");
+    setTimeout(() => watchToast.classList.add("hidden"), 400);
+  }, WATCH_TOAST_MS);
+}
+
+// What actually changed, in one sentence. The findings half is built in
+// Python (findings.describe_finding_changes) for the same reason the load
+// stat line is: its omission rules ARE the content, and a second copy here
+// is how the two would drift.
+function describeReprofile(stats, changes) {
+  const parts = [];
+  if (stats && stats.files_scanned) {
+    parts.push(
+      stats.files_scanned === 1
+        ? "Re-profiled 1 new file"
+        : `Re-profiled ${stats.files_scanned} new files`
+    );
+  } else {
+    parts.push("Re-profiled");
+  }
+  if (stats && typeof stats.row_count === "number") {
+    parts.push(`${stats.row_count.toLocaleString()} rows total`);
+  }
+  const sentence = parts.join(" — ") + ".";
+  return changes && changes.summary ? `${sentence} ${changes.summary}` : sentence;
+}
+
+async function runWatchReprofile() {
+  if (reprofileInFlight || manualLoadInFlight) return;
+  reprofileInFlight = true;
+  try {
+    const started = await window.pywebview.api.begin_watch_reprofile();
+    if (started.error) {
+      // Not an error banner: a re-profile that cannot run (the folder was
+      // closed, the schema group vanished) is not something the user did.
+      showWatchToast(started.error);
+      return;
+    }
+    const state = await pollFolderLoad();
+    if (state.error) {
+      showWatchToast(`Re-profile failed: ${state.error}`);
+      return;
+    }
+    if (!state.result) return;
+    const ok = await finishLoadingDataset(state.result, { quiet: true });
+    if (!ok) return;
+    renderPartialBanner(state.result);
+    // runFindingsScan() has already re-run inside finishLoadingDataset, so
+    // this reads the diff it computed rather than scanning twice.
+    showWatchToast(describeReprofile(state.result.load_stats, latestFindingChanges));
+  } finally {
+    reprofileInFlight = false;
+  }
+}
+
+async function pollWatch() {
+  try {
+    const status = await window.pywebview.api.get_watch_status();
+    renderWatchIndicator(status);
+    if (status.reprofile_pending) await runWatchReprofile();
+  } catch (err) {
+    // A failed poll is not worth an error banner; the next one is 500ms away.
+    watchIndicator.classList.add("hidden");
+  }
+  setTimeout(pollWatch, JOBS_POLL_MS);
+}
+
 // loaded once on startup, re-saved (and re-read back) on every change, so
 // this file only ever renders whatever the backend confirms was persisted.
 const classificationBannerSlot = document.getElementById("classification-banner-slot");
@@ -922,6 +1419,28 @@ const settingsBannerColor = document.getElementById("settings-banner-color");
 const settingsAuditEnabled = document.getElementById("settings-audit-enabled");
 const settingsAuditLogPath = document.getElementById("settings-audit-log-path");
 const settingsThemeInputs = document.querySelectorAll('input[name="settings-theme"]');
+const settingsMemoryCeiling = document.getElementById("settings-memory-ceiling");
+const settingsMemoryCeilingHint = document.getElementById("settings-memory-ceiling-hint");
+const settingsMemoryCeilingWarning = document.getElementById("settings-memory-ceiling-warning");
+const settingsCacheSize = document.getElementById("settings-cache-size");
+const settingsCachePath = document.getElementById("settings-cache-path");
+const settingsCacheResult = document.getElementById("settings-cache-result");
+const clearCacheBtn = document.getElementById("clear-cache-btn");
+const reprofileBtn = document.getElementById("reprofile-btn");
+const settingsWatchEnabled = document.getElementById("settings-watch-enabled");
+const settingsWatchFolder = document.getElementById("settings-watch-folder");
+const settingsWatchStability = document.getElementById("settings-watch-stability");
+const settingsWatchHint = document.getElementById("settings-watch-hint");
+const settingsTsGap = document.getElementById("settings-ts-gap");
+const settingsTsFlatline = document.getElementById("settings-ts-flatline");
+const settingsTsShort = document.getElementById("settings-ts-short");
+const settingsTsJitter = document.getElementById("settings-ts-jitter");
+const settingsTsChannels = document.getElementById("settings-ts-channels");
+const settingsTimelineChannels = document.getElementById("settings-timeline-channels");
+const settingsTimelineRows = document.getElementById("settings-timeline-rows");
+const settingsTsHint = document.getElementById("settings-ts-hint");
+const watchLoadedBtn = document.getElementById("watch-loaded-btn");
+const watchChooseBtn = document.getElementById("watch-choose-btn");
 
 // --- Theme ------------------------------------------------------------
 //
@@ -946,7 +1465,11 @@ async function applyTheme(preference, { rerender = true } = {}) {
   // Must follow the stamp: the constants are read back out of the
   // stylesheet, so they pick up whichever block is now in effect.
   refreshChartColors();
-  if (rerender && latestChartData) await renderCharts(latestChartData);
+  if (rerender && latestChartData) {
+    await renderCharts(latestChartData);
+    await redrawFleetCharts();
+    await redrawTimeline();
+  }
 }
 
 // Only while following the OS — an explicit choice must not be overridden
@@ -1005,6 +1528,128 @@ function applySettingsToForm(settings) {
   for (const input of settingsThemeInputs) {
     input.checked = input.value === settings.theme;
   }
+  applyMemoryCeilingToForm(settings);
+  if (settings.cache) applyCacheToForm(settings.cache);
+  applyWatchToForm(settings);
+  applyTimeseriesToForm(settings);
+  renderWatchIndicator(settings.watch);
+}
+
+// Ratios are stored as ratios and shown as percentages: 0.5 is what the
+// code compares against, "50%" is what a person reads.
+function applyTimeseriesToForm(settings) {
+  settingsTsGap.value = settings.timeseries_gap_factor;
+  settingsTsFlatline.value = settings.timeseries_flatline_rows;
+  settingsTsShort.value = Math.round(settings.timeseries_short_unit_ratio * 100);
+  settingsTsJitter.value = Math.round(settings.timeseries_jitter_ratio * 100);
+  settingsTsChannels.value = settings.timeseries_max_channels;
+  settingsTimelineChannels.value = settings.timeline_max_channels;
+  settingsTimelineRows.value = settings.timeline_max_rows;
+  const documented = Object.keys(settings.timeseries_ranges || {}).length;
+  settingsTsHint.textContent = documented
+    ? `${documented} channel(s) have a documented range, so out-of-range is an exact count for them.`
+    : "No documented channel ranges are configured, so out-of-range falls back to a " +
+      "labelled heuristic on the extremes.";
+}
+
+settingsTsGap.addEventListener("change", () => {
+  saveSettings({ timeseries_gap_factor: parseFloat(settingsTsGap.value) || null });
+});
+settingsTsFlatline.addEventListener("change", () => {
+  saveSettings({ timeseries_flatline_rows: parseInt(settingsTsFlatline.value, 10) || null });
+});
+settingsTsShort.addEventListener("change", () => {
+  const percent = parseFloat(settingsTsShort.value);
+  saveSettings({
+    timeseries_short_unit_ratio: Number.isFinite(percent) ? percent / 100 : null,
+  });
+});
+settingsTsJitter.addEventListener("change", () => {
+  const percent = parseFloat(settingsTsJitter.value);
+  saveSettings({ timeseries_jitter_ratio: Number.isFinite(percent) ? percent / 100 : null });
+});
+settingsTsChannels.addEventListener("change", () => {
+  saveSettings({ timeseries_max_channels: parseInt(settingsTsChannels.value, 10) || null });
+});
+settingsTimelineChannels.addEventListener("change", () => {
+  saveSettings({ timeline_max_channels: parseInt(settingsTimelineChannels.value, 10) || null });
+});
+settingsTimelineRows.addEventListener("change", () => {
+  saveSettings({ timeline_max_rows: parseInt(settingsTimelineRows.value, 10) || null });
+});
+
+function applyWatchToForm(settings) {
+  settingsWatchEnabled.checked = Boolean(settings.watch_enabled);
+  settingsWatchFolder.textContent = settings.watch_folder || "No folder chosen yet";
+  settingsWatchStability.min = settings.watch_min_stability_seconds || 1;
+  settingsWatchStability.value = settings.watch_stability_seconds;
+  // The checkbox can be on with nothing to watch, and a checkbox that says
+  // "on" while nothing is happening is worse than one that explains itself.
+  settingsWatchHint.textContent = settings.watch_enabled && !settings.watch_folder
+    ? "Watching is on, but no folder has been chosen yet."
+    : `Minimum ${settings.watch_min_stability_seconds || 1} second. ` +
+      "A shorter interval reacts sooner; a longer one is safer with slow writers.";
+}
+
+settingsWatchEnabled.addEventListener("change", () => {
+  saveSettings({ watch_enabled: settingsWatchEnabled.checked });
+});
+
+settingsWatchStability.addEventListener("change", () => {
+  const seconds = parseInt(settingsWatchStability.value, 10);
+  saveSettings({ watch_stability_seconds: Number.isFinite(seconds) ? seconds : null });
+});
+
+// By far the common case — someone opens a day's output and wants to see
+// the rest of it arrive — so it is one click rather than finding the same
+// folder again in a picker.
+watchLoadedBtn.addEventListener("click", async () => {
+  const settings = await window.pywebview.api.watch_loaded_folder();
+  if (settings.error) {
+    settingsWatchHint.textContent = settings.error;
+    return;
+  }
+  applySettingsToForm(settings);
+});
+
+watchChooseBtn.addEventListener("click", async () => {
+  const folder = await window.pywebview.api.watch_folder_dialog();
+  if (!folder) return;
+  saveSettings({ watch_folder: folder, watch_enabled: true });
+});
+
+// The size and the file count both, because either alone is misleading:
+// "4.2 MiB" says nothing about how much work it saves, and "279 files"
+// says nothing about whether it is worth keeping.
+function applyCacheToForm(cache) {
+  const files = cache.entries === 1 ? "1 file" : `${cache.entries.toLocaleString()} files`;
+  settingsCacheSize.textContent = `${cache.size_label} — profiles for ${files}`;
+  settingsCachePath.textContent = cache.path;
+}
+
+// The box always shows the ceiling actually in force, whether the user set
+// it or it was derived from this machine's RAM — an empty box beside "work
+// stops at this limit" tells nobody what the limit is. The hint below says
+// which of the two it is, so "8" that the user chose and "8" the machine
+// worked out are not the same silent number.
+function applyMemoryCeilingToForm(settings) {
+  const minMb = settings.memory_ceiling_min_mb || 2048;
+  const minGb = Math.round(minMb / 1024);
+  const defaultGb = Math.round(settings.memory_ceiling_default_mb / 1024);
+  settingsMemoryCeiling.min = minGb;
+  settingsMemoryCeiling.value = Math.round(settings.memory_ceiling_effective_mb / 1024);
+  settingsMemoryCeilingHint.textContent = settings.memory_ceiling_mb
+    ? "Minimum " + minGb + " GB. This machine's default is " + defaultGb + " GB, half its physical RAM."
+    : "Using this machine's default: " + defaultGb + " GB, half its physical RAM. Minimum " + minGb + " GB.";
+
+  const status = settings.memory_ceiling_status || {};
+  if (status.supported) {
+    settingsMemoryCeilingWarning.classList.add("hidden");
+    settingsMemoryCeilingWarning.textContent = "";
+  } else {
+    settingsMemoryCeilingWarning.textContent = status.reason;
+    settingsMemoryCeilingWarning.classList.remove("hidden");
+  }
 }
 
 // Saves immediately (no explicit Save button, per the settings spec) and
@@ -1034,6 +1679,64 @@ for (const input of settingsThemeInputs) {
     if (input.checked) saveSettings({ theme: input.value });
   });
 }
+clearCacheBtn.addEventListener("click", async () => {
+  clearCacheBtn.disabled = true;
+  try {
+    const cache = await window.pywebview.api.clear_cache();
+    applyCacheToForm(cache);
+    settingsCacheResult.textContent =
+      cache.removed === 0
+        ? "The cache was already empty."
+        : `Cleared ${cache.removed.toLocaleString()} cached file profile(s).`;
+  } finally {
+    clearCacheBtn.disabled = false;
+  }
+});
+
+// Distinct from Clear cache, and the difference is the point: this drops
+// only the loaded folder's entries and immediately reads it again, which
+// is the action someone takes when they suspect the numbers on screen are
+// wrong. Other folders keep their profiles.
+reprofileBtn.addEventListener("click", async () => {
+  reprofileBtn.disabled = true;
+  try {
+    const started = await window.pywebview.api.force_full_reprofile();
+    if (started.error) {
+      settingsCacheResult.textContent = started.error;
+      return;
+    }
+    settingsCacheResult.textContent = "Re-profiling the loaded folder…";
+    clearError();
+    showLoading("Re-profiling folder…");
+    showProgress();
+    try {
+      const state = await pollFolderLoad();
+      if (state.error) {
+        showError(state.error);
+        return;
+      }
+      if (state.result) {
+        await finishLoadingDataset(state.result);
+        renderPartialBanner(state.result);
+      }
+    } finally {
+      hideProgress();
+      hideLoading();
+    }
+    settingsCacheResult.textContent = "Re-profiled from disk.";
+    applyCacheToForm(await window.pywebview.api.get_cache_info());
+  } finally {
+    reprofileBtn.disabled = false;
+  }
+});
+
+settingsMemoryCeiling.addEventListener("change", () => {
+  // Sent in MB because that is the unit the runner and the Job Object work
+  // in; GB is presentation. A blank box means "go back to this machine's
+  // default", which is a real choice and not the same as typing it in.
+  const gb = parseFloat(settingsMemoryCeiling.value);
+  saveSettings({ memory_ceiling_mb: Number.isFinite(gb) ? Math.round(gb * 1024) : null });
+});
 
 async function initSettings() {
   const settings = await window.pywebview.api.get_settings();
@@ -1041,6 +1744,11 @@ async function initSettings() {
   renderClassificationBanner(settings);
   // No charts exist yet at startup, so nothing to re-render.
   await applyTheme(settings.theme || "system", { rerender: false });
+  // Bring the watcher up to whatever was persisted before polling it: a
+  // watch that was on when the app closed should be on when it reopens.
+  renderWatchIndicator(await window.pywebview.api.sync_watch());
+  pollJobs();
+  pollWatch();
 }
 
 // pywebview injects window.pywebview.api asynchronously; `pywebviewready`
@@ -1062,9 +1770,21 @@ const reportsSectionCheckboxes = document.getElementById("reports-section-checkb
 const generateReportBtn = document.getElementById("generate-report-btn");
 const reportsResult = document.getElementById("reports-result");
 
-const REPORT_SECTION_ORDER = ["overview", "distributions", "embeddings", "media"];
+const REPORT_SECTION_ORDER = [
+  "overview",
+  "health",
+  "distributions",
+  "embeddings",
+  "media",
+];
 const REPORT_SECTION_LABELS = {
   overview: "Overview",
+  // Offered only above unit scope — one row is not a catalogue, and the
+  // health section beside it already says everything that row would.
+  catalog: "Catalogue summary",
+  // Offered only when a timestamp column was detected — available_sections
+  // decides, and it uses the same precondition the checks declare.
+  health: "Recording health",
   distributions: "Distributions",
   embeddings: "Embeddings",
   media: "Media",
@@ -1128,13 +1848,58 @@ generateReportBtn.addEventListener("click", async () => {
   generateReportBtn.disabled = true;
   reportsResult.classList.add("hidden");
   try {
-    const result = await window.pywebview.api.generate_report(outputPath, selectedSections);
-    reportsResult.textContent = result.error ? result.error : `Saved to ${result.path}`;
+    // Started and polled rather than awaited in one call: generating a PDF
+    // rasterizes every chart through a real Chromium (kaleido), which is
+    // tens of seconds on a wide dataset. It also runs in a capped worker,
+    // so it appears in the top strip's jobs indicator with a Cancel — the
+    // same place every other long operation appears.
+    const started = await window.pywebview.api.start_report_generation(
+      outputPath,
+      selectedSections
+    );
+    if (started.error) {
+      reportsResult.textContent = started.error;
+      reportsResult.classList.remove("hidden");
+      return;
+    }
+    const state = await pollReport();
+    reportsResult.textContent = describeReportOutcome(state);
     reportsResult.classList.remove("hidden");
   } finally {
     generateReportBtn.disabled = false;
   }
 });
+
+function pollReport() {
+  return new Promise((resolve) => {
+    const tick = async () => {
+      let state;
+      try {
+        state = await window.pywebview.api.get_report_progress();
+      } catch (err) {
+        resolve({ error: String(err) });
+        return;
+      }
+      if (state.finished) {
+        resolve(state);
+        return;
+      }
+      setTimeout(tick, LOAD_POLL_MS);
+    };
+    tick();
+  });
+}
+
+// A cancelled report and a failed one are different things and say so. The
+// ceiling case needs no special handling here: the backend already puts the
+// "Stopped at the N GB ceiling" sentence in `error`, which is the message
+// to show — there is nothing more useful this side could add to it.
+function describeReportOutcome(state) {
+  if (state.cancelled) return "Report generation was cancelled. No file was written.";
+  if (state.error) return state.error;
+  const path = state.result && state.result.path;
+  return path ? `Saved to ${path}` : "Report generation produced no file.";
+}
 
 // --- Open Folder (Stage 2: folder loading) ---
 // discover_folder() only ever reads schema + cheap format metadata (see
@@ -1253,6 +2018,300 @@ function chooseFolderGroup(discovery) {
   });
 }
 
+// --- Directory structure and scope -------------------------------------
+//
+// A structure is DETECTED, CONFIRMED and OPTIONAL. Nothing in this file
+// knows what the levels are called: "group" and "series" are the roles,
+// and whatever the user types as a LABEL is what the UI shows. A folder
+// with no structure hides all of it and behaves exactly as it always has.
+
+const scopeBreadcrumb = document.getElementById("scope-breadcrumb");
+const STRUCTURE_ROLES = [
+  ["group", "Group — this level identifies something"],
+  ["series", "Series — these directories hold ordered chunks"],
+  ["ignore", "Ignore — structure only"],
+];
+const TIMESTAMP_UNITS = ["s", "ms", "us", "ns"];
+const DEFAULT_LABELS = { group: "Group", series: "Series", ignore: "" };
+
+// Shown once per root — the answer is saved against a fingerprint of the
+// tree's shape — and always reopenable. Offered even when nothing was
+// detected, because "an arbitrary nested tree" is a supported shape whose
+// roles only a person can supply.
+function chooseStructure(proposal, saved) {
+  return new Promise((resolve) => {
+    let resolved = false;
+    const roles = {};
+    const labels = {};
+    for (const level of proposal.levels) {
+      const depth = String(level.depth);
+      roles[depth] = (saved && saved.roles && saved.roles[depth]) || level.role;
+      labels[depth] = (saved && saved.labels && saved.labels[depth]) || level.label || "";
+    }
+    let rootLabel = (saved && saved.root_label) || "All";
+    let timestampColumn = (saved && saved.timestamp_column) || proposal.suggested_timestamp || "";
+    let timestampUnit = (saved && saved.timestamp_unit) || proposal.suggested_unit || "";
+
+    function onEscape(event) {
+      if (event.key === "Escape") finish(null);
+    }
+
+    function finish(value) {
+      if (resolved) return;
+      resolved = true;
+      document.removeEventListener("keydown", onEscape);
+      closeModal();
+      resolve(value);
+    }
+
+    setModalContent((body) => {
+      const heading = document.createElement("h2");
+      heading.textContent = "Confirm this folder's structure";
+      body.appendChild(heading);
+
+      const note = document.createElement("p");
+      note.className = "chart-note";
+      note.textContent =
+        "Each directory level gets a role. A group level identifies something the data is " +
+        "split by; a series level holds the ordered chunks of one dataset. Both are optional, " +
+        "and the names you give them are what the app will show. This is remembered for this folder.";
+      body.appendChild(note);
+
+      if (!proposal.levels.length) {
+        const empty = document.createElement("p");
+        empty.className = "chart-note";
+        empty.textContent = "This folder has no sub-directories, so there is nothing to map.";
+        body.appendChild(empty);
+      }
+
+      for (const level of proposal.levels) {
+        const depth = String(level.depth);
+        const row = document.createElement("div");
+        row.className = "structure-level";
+
+        const position = document.createElement("span");
+        position.textContent = `Level ${level.depth + 1}`;
+        row.appendChild(position);
+
+        const select = document.createElement("select");
+        for (const [value, text] of STRUCTURE_ROLES) {
+          const option = document.createElement("option");
+          option.value = value;
+          option.textContent = text;
+          option.selected = value === roles[depth];
+          select.appendChild(option);
+        }
+        row.appendChild(select);
+
+        // The label is the user's word for this level. It follows the role
+        // until they type something, so the common case needs no typing at
+        // all and the uncommon one is never fought with.
+        const labelInput = document.createElement("input");
+        labelInput.type = "text";
+        labelInput.className = "structure-level-label";
+        labelInput.placeholder = DEFAULT_LABELS[roles[depth]] || "Name for this level";
+        labelInput.value = labels[depth];
+        labelInput.addEventListener("input", () => {
+          labels[depth] = labelInput.value;
+        });
+        labelInput.disabled = roles[depth] === "ignore";
+        row.appendChild(labelInput);
+
+        select.addEventListener("change", () => {
+          roles[depth] = select.value;
+          labelInput.disabled = select.value === "ignore";
+          labelInput.placeholder = DEFAULT_LABELS[select.value] || "Name for this level";
+        });
+
+        const examples = document.createElement("span");
+        examples.className = "structure-level-examples";
+        const shown = level.examples.slice(0, 3).join(", ");
+        examples.textContent =
+          level.directory_count > 3
+            ? `${shown}, … (${level.directory_count} in total)`
+            : `${shown} (${level.directory_count})`;
+        examples.title = level.examples.join(", ");
+        row.appendChild(examples);
+
+        body.appendChild(row);
+      }
+
+      const rootRow = document.createElement("div");
+      rootRow.className = "structure-timestamp";
+      rootRow.appendChild(document.createTextNode("Call the whole folder"));
+      const rootInput = document.createElement("input");
+      rootInput.type = "text";
+      rootInput.className = "structure-level-label";
+      rootInput.value = rootLabel;
+      rootInput.placeholder = "All";
+      rootInput.addEventListener("input", () => {
+        rootLabel = rootInput.value;
+      });
+      rootRow.appendChild(rootInput);
+      body.appendChild(rootRow);
+
+      if (proposal.timestamp_candidates.length) {
+        const timeRow = document.createElement("div");
+        timeRow.className = "structure-timestamp";
+        timeRow.appendChild(document.createTextNode("Order chunks by"));
+
+        const columnSelect = document.createElement("select");
+        for (const candidate of proposal.timestamp_candidates) {
+          const option = document.createElement("option");
+          option.value = candidate.column;
+          option.textContent = `${candidate.column} (${candidate.dtype})`;
+          option.selected = candidate.column === timestampColumn;
+          columnSelect.appendChild(option);
+        }
+        columnSelect.addEventListener("change", () => {
+          timestampColumn = columnSelect.value;
+        });
+        timeRow.appendChild(columnSelect);
+
+        // Only numeric timestamps need a unit; a datetime column already
+        // carries one, so asking would be inventing a question.
+        if (proposal.timestamp_candidates.some((c) => c.kind === "numeric")) {
+          timeRow.appendChild(document.createTextNode("in"));
+          const unitSelect = document.createElement("select");
+          for (const unit of TIMESTAMP_UNITS) {
+            const option = document.createElement("option");
+            option.value = unit;
+            option.textContent = unit;
+            option.selected = unit === timestampUnit;
+            unitSelect.appendChild(option);
+          }
+          unitSelect.addEventListener("change", () => {
+            timestampUnit = unitSelect.value;
+          });
+          timeRow.appendChild(unitSelect);
+        }
+        body.appendChild(timeRow);
+      }
+
+      const actions = document.createElement("div");
+      actions.className = "folder-modal-actions";
+
+      const confirmBtn = document.createElement("button");
+      confirmBtn.className = "btn-primary";
+      confirmBtn.textContent = "Use this structure";
+      confirmBtn.addEventListener("click", () =>
+        finish({
+          root: proposal.root,
+          roles,
+          labels,
+          root_label: rootLabel,
+          fingerprint: proposal.fingerprint,
+          timestamp_column: timestampColumn,
+          timestamp_unit: timestampUnit,
+        })
+      );
+      actions.appendChild(confirmBtn);
+
+      // The escape hatch that keeps the structure optional in practice as
+      // well as in principle.
+      const flatBtn = document.createElement("button");
+      flatBtn.className = "btn-secondary";
+      flatBtn.textContent = "Load as a flat folder";
+      flatBtn.addEventListener("click", () => finish({ flat: true }));
+      actions.appendChild(flatBtn);
+
+      body.appendChild(actions);
+    });
+
+    modalCloseBtn.addEventListener("click", () => finish(null), { once: true });
+    detailModal
+      .querySelector(".modal-backdrop")
+      .addEventListener("click", () => finish(null), { once: true });
+    document.addEventListener("keydown", onEscape);
+    showModal();
+  });
+}
+
+function renderScopeBreadcrumb(scope) {
+  if (!scope || !scope.active) {
+    scopeBreadcrumb.classList.add("hidden");
+    scopeBreadcrumb.replaceChildren();
+    return;
+  }
+
+  const parts = [];
+  scope.crumbs.forEach((crumb, index) => {
+    if (index > 0) {
+      const separator = document.createElement("span");
+      separator.className = "scope-separator";
+      separator.textContent = "›";
+      parts.push(separator);
+    }
+    const button = document.createElement("button");
+    button.type = "button";
+    const isCurrent = index === scope.crumbs.length - 1;
+    button.className = isCurrent ? "scope-crumb scope-current" : "scope-crumb";
+    button.textContent = crumb.label;
+    // The level's own name, in the mapping's words — so a crumb can say
+    // what KIND of thing it is on hover without the breadcrumb growing a
+    // second line.
+    button.title = crumb.level_label ? `${crumb.level_label}: ${crumb.label}` : crumb.label;
+    if (!isCurrent) {
+      // Only the crumbs ABOVE you are links: the last one is where you
+      // are, not somewhere to go.
+      button.addEventListener("click", () => changeScope(crumb.values, crumb.unit_id));
+    }
+    parts.push(button);
+  });
+
+  if (scope.options && scope.options.length) {
+    const select = document.createElement("select");
+    const placeholder = document.createElement("option");
+    placeholder.value = "";
+    placeholder.textContent = `All ${scope.option_label || "items"}`;
+    select.appendChild(placeholder);
+    for (const value of scope.options) {
+      const element = document.createElement("option");
+      element.value = value;
+      element.textContent = value;
+      select.appendChild(element);
+    }
+    select.addEventListener("change", () => {
+      if (!select.value) return;
+      if (scope.option_kind === "unit") changeScope(scope.values, select.value);
+      else changeScope([...scope.values, select.value], null);
+    });
+    parts.push(select);
+  }
+
+  scopeBreadcrumb.replaceChildren(...parts);
+  scopeBreadcrumb.classList.remove("hidden");
+}
+
+// A scope change is a LOAD, not a filter — narrowing means fewer chunks to
+// read, and it is incremental through the profile cache, so moving around
+// an already-profiled tree reads nothing.
+async function changeScope(values, unitId) {
+  if (manualLoadInFlight) return;
+  clearError();
+  showLoading("Loading selection…");
+  showProgress();
+  try {
+    const started = await window.pywebview.api.set_scope(values || [], unitId || null);
+    if (started.error) {
+      showError(started.error);
+      return;
+    }
+    const state = await pollFolderLoad();
+    if (state.error) {
+      showError(state.error);
+      return;
+    }
+    if (!state.result) return;
+    await finishLoadingDataset(state.result);
+    renderPartialBanner(state.result);
+  } finally {
+    hideProgress();
+    hideLoading();
+    renderScopeBreadcrumb(await window.pywebview.api.get_scope());
+  }
+}
+
 async function handleOpenFolder() {
   const path = await window.pywebview.api.open_folder_dialog();
   if (!path) return;
@@ -1270,8 +2329,74 @@ async function handleOpenFolder() {
     return;
   }
 
+  if (discovery.source === "structure") {
+    await openStructuredFolder(discovery);
+    return;
+  }
+  await openFlatFolder(discovery);
+}
+
+const structureNote = document.getElementById("structure-note");
+const structureNoteText = document.getElementById("structure-note-text");
+const structureNoteBtn = document.getElementById("structure-note-btn");
+
+// Shown after a folder with sub-directories loads flat. The button is the
+// point of it: the levels exist and are mappable, the code just declined
+// to guess what they mean.
+function renderStructureNote(discovery) {
+  const note = discovery && discovery.note;
+  if (!note) {
+    structureNote.classList.add("hidden");
+    return;
+  }
+  structureNoteText.textContent = note;
+  structureNoteBtn.classList.toggle("hidden", !discovery.mappable);
+  structureNote.classList.remove("hidden");
+}
+
+structureNoteBtn.addEventListener("click", async () => {
+  const proposal = await window.pywebview.api.get_structure_proposal();
+  if (!proposal || !proposal.levels || !proposal.levels.length) return;
+  const mapping = await chooseStructure(proposal, proposal.saved);
+  if (!mapping || mapping.flat) return;
+  const confirmed = await window.pywebview.api.confirm_structure(mapping);
+  if (confirmed.error) {
+    showError(confirmed.error);
+    return;
+  }
+  structureNote.classList.add("hidden");
+  const started = await window.pywebview.api.start_scope_load();
+  if (started.error) {
+    showError(started.error);
+    return;
+  }
+  showLoading("Loading selection…");
+  showProgress();
+  try {
+    const state = await pollFolderLoad();
+    if (state.error) {
+      showError(state.error);
+      return;
+    }
+    if (state.result) {
+      await finishLoadingDataset(state.result);
+      renderPartialBanner(state.result);
+    }
+  } finally {
+    hideProgress();
+    hideLoading();
+    renderScopeBreadcrumb(await window.pywebview.api.get_scope());
+  }
+});
+
+// The schema-group path, completely unchanged. Reached when nothing was
+// detected, and when the user declines a structure that was.
+async function openFlatFolder(discovery) {
+  renderScopeBreadcrumb({ active: false });
+  renderStructureNote(discovery);
+
   let groupIndex = discovery.default_group_index;
-  if (discovery.groups.length > 1) {
+  if ((discovery.groups || []).length > 1) {
     groupIndex = await chooseFolderGroup(discovery);
     if (groupIndex === null) return; // cancelled — nothing loaded, leave the app as it was
   }
@@ -1300,6 +2425,54 @@ async function handleOpenFolder() {
   } finally {
     hideProgress();
     hideLoading();
+  }
+}
+
+async function openStructuredFolder(discovery) {
+  structureNote.classList.add("hidden");
+  if (discovery.needs_confirmation) {
+    const saved = (await window.pywebview.api.get_structure_proposal()).saved;
+    const mapping = await chooseStructure(discovery.structure_proposal, saved);
+    if (!mapping) return; // cancelled — leave the app exactly as it was
+    if (mapping.flat) {
+      // Explicitly declined: fall back to the schema-group path, which is
+      // what this folder would have done had nothing been detected.
+      const flat = await window.pywebview.api.clear_structure();
+      if (flat.error) {
+        showError(flat.error);
+        return;
+      }
+      await openFlatFolder(flat);
+      return;
+    }
+    const confirmed = await window.pywebview.api.confirm_structure(mapping);
+    if (confirmed.error) {
+      showError(confirmed.error);
+      return;
+    }
+  }
+
+  const started = await window.pywebview.api.start_scope_load();
+  if (started.error) {
+    showError(started.error);
+    return;
+  }
+
+  showLoading("Loading selection…");
+  showProgress();
+  try {
+    const state = await pollFolderLoad();
+    if (state.error) {
+      showError(state.error);
+      return;
+    }
+    if (!state.result) return;
+    await finishLoadingDataset(state.result);
+    renderPartialBanner(state.result);
+  } finally {
+    hideProgress();
+    hideLoading();
+    renderScopeBreadcrumb(await window.pywebview.api.get_scope());
   }
 }
 

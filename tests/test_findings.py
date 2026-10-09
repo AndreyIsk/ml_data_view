@@ -15,6 +15,7 @@ from ml_data_view.findings import (
     HIGH_MISSINGNESS,
     INSTANT_CHECKS,
     Finding,
+    diff_findings,
     run_instant_checks,
     severity_summary,
     sorted_findings,
@@ -433,13 +434,28 @@ def test_run_instant_checks_reports_every_check_even_when_it_finds_nothing():
     results = run_instant_checks(_dataset_info(10, [("id", "Int64", 0)]), _chart_data())
 
     assert [r["id"] for r in results] == [spec.id for spec in INSTANT_CHECKS]
-    assert all(r["status"] == "done" for r in results)
+    # Every check is accounted for — but a check whose precondition this
+    # bare dataset does not have is SKIPPED, which is neither a pass nor a
+    # failure. The four conditional checks are exactly the ones with an
+    # `applies` predicate.
+    conditional = {spec.id for spec in INSTANT_CHECKS if spec.applies is not None}
+    for result in results:
+        expected = "skipped" if result["id"] in conditional else "done"
+        assert result["status"] == expected, result
+    assert all(r.get("reason") for r in results if r["status"] == "skipped")
 
 
 def test_run_instant_checks_keeps_the_catalogue_order_stable():
     results = run_instant_checks(_dataset_info(10, [("id", "Int64", 0)]), _chart_data())
 
     assert [r["id"] for r in results] == [
+        # The conditional checks come first: what data is here at all, and
+        # whether it is ordered in time, frame everything below them. Each
+        # declares a precondition and simply does not run without it, which
+        # is why a flat CSV sees the four of them skipped.
+        "structure",
+        "timestamp_integrity",
+        "group_balance",
         "empty_dataset",
         "all_null_column",
         "high_missingness",
@@ -449,6 +465,24 @@ def test_run_instant_checks_keeps_the_catalogue_order_stable():
         "correlated_missingness",
         "likely_id_column",
         "skewed_numeric",
+        # Time-series health joins the registry from its own module
+        # (ts_checks.py), appended after the checks defined here.
+        "timestamp_monotonic",
+        "duplicate_timestamps",
+        "sample_rate",
+        "time_gaps",
+        "short_unit",
+        "missing_chunk",
+        "chunk_overlap",
+        "channel_nan_run",
+        "channel_flatline",
+        "channel_saturation",
+        "channel_out_of_range",
+        # Group comparison joins from its own module too (fleet_checks.py),
+        # appended after the time-series family.
+        "fleet_channel_divergence",
+        "fleet_group_duration",
+        "unit_outlier",
     ]
 
 
@@ -457,14 +491,20 @@ def test_a_check_that_raises_becomes_an_error_row_not_a_silent_pass(monkeypatch)
     def boom(ctx):
         raise ValueError("bad payload")
 
-    monkeypatch.setattr(INSTANT_CHECKS[0], "fn", boom)
+    # An UNCONDITIONAL check, so it genuinely runs and genuinely raises —
+    # patching a skipped one would prove nothing.
+    target = next(spec for spec in INSTANT_CHECKS if spec.applies is None)
+    monkeypatch.setattr(target, "fn", boom)
 
     results = run_instant_checks(_dataset_info(10, [("id", "Int64", 0)]), _chart_data())
 
-    assert results[0]["status"] == "error"
-    assert "bad payload" in results[0]["error"]
+    failed = next(r for r in results if r["id"] == target.id)
+    assert failed["status"] == "error"
+    assert "bad payload" in failed["error"]
     # and the rest of the scan still ran
-    assert all(r["status"] == "done" for r in results[1:])
+    assert all(
+        r["status"] in ("done", "skipped") for r in results if r["id"] != target.id
+    )
 
 
 def test_run_instant_checks_tolerates_a_chart_payload_missing_keys():
@@ -472,7 +512,8 @@ def test_run_instant_checks_tolerates_a_chart_payload_missing_keys():
     on a payload that predates a key it reads."""
     results = run_instant_checks(_dataset_info(10, [("id", "Int64", 0)]), {})
 
-    assert all(r["status"] == "done" for r in results)
+    assert all(r["status"] in ("done", "skipped") for r in results)
+    assert not any(r["status"] == "error" for r in results)
 
 
 # --- sorting and summary ------------------------------------------------
@@ -523,3 +564,138 @@ def test_class_imbalance_skips_a_column_already_reported_as_constant():
 
     assert "constant_column" in _ids(findings)
     assert "class_imbalance" not in _ids(findings)
+
+
+# --- comparing one scan against the last ---------------------------------
+#
+# What a watch-triggered re-profile interrupts someone for. "12 findings"
+# after every file lands is noise; "1 new finding: high null rate in column
+# X" is the thing they opened the app for.
+
+
+def _finding(check_id, columns, title="High null rate", detail="41% missing"):
+    return {
+        "check_id": check_id,
+        "severity": "warning",
+        "title": title,
+        "detail": detail,
+        "columns": list(columns),
+    }
+
+
+def test_no_previous_scan_means_no_diff():
+    """A first profile has nothing to compare against, and calling every
+    finding on a freshly opened dataset "new" would make the word mean
+    nothing."""
+    assert diff_findings(None, [_finding("a", ["x"])]) is None
+
+
+def test_a_finding_that_appeared_is_new():
+    changes = diff_findings([_finding("a", ["x"])], [_finding("a", ["x"]), _finding("a", ["y"])])
+
+    assert [f["columns"] for f in changes["new"]] == [["y"]]
+    assert changes["resolved"] == []
+    assert changes["summary"] == "1 new finding: High null rate in column y."
+
+
+def test_a_finding_that_went_away_is_resolved():
+    changes = diff_findings([_finding("a", ["x"]), _finding("a", ["y"])], [_finding("a", ["x"])])
+
+    assert [f["columns"] for f in changes["resolved"]] == [["y"]]
+    assert changes["summary"] == "1 resolved."
+
+
+def test_a_changed_detail_is_not_a_new_finding():
+    """Identity is the check plus its columns, NOT the detail text — which
+    carries counts that move with every file. "41% missing" becoming "43%
+    missing" is the same finding, and reporting it as new would train
+    people to ignore the notification."""
+    before = [_finding("high_missingness", ["x"], detail="41% missing")]
+    after = [_finding("high_missingness", ["x"], detail="43% missing")]
+
+    changes = diff_findings(before, after)
+
+    assert changes["new"] == []
+    assert changes["summary"] == "No new findings."
+
+
+def test_the_same_check_on_a_different_column_is_a_different_finding():
+    changes = diff_findings([_finding("a", ["x"])], [_finding("a", ["z"])])
+
+    assert len(changes["new"]) == 1
+    assert len(changes["resolved"]) == 1
+
+
+def test_nothing_changing_still_says_so():
+    """Worth saying: it is the answer someone watching a pipeline most
+    wants, and is otherwise indistinguishable from the check not running."""
+    findings = [_finding("a", ["x"])]
+
+    assert diff_findings(findings, findings)["summary"] == "No new findings."
+
+
+def test_several_new_findings_are_counted_not_listed():
+    """A notification that names eight columns is not a notification."""
+    changes = diff_findings([], [_finding("a", ["x"]), _finding("b", ["y"])])
+
+    assert changes["summary"] == "2 new findings."
+
+
+def test_a_finding_across_several_columns_is_named_by_count():
+    changes = diff_findings([], [_finding("corr", ["a", "b", "c"], title="Correlated missingness")])
+
+    assert changes["summary"] == "1 new finding: Correlated missingness across 3 columns."
+
+
+def test_a_finding_with_no_columns_is_named_by_title_alone():
+    changes = diff_findings([], [_finding("empty", [], title="Dataset is empty")])
+
+    assert changes["summary"] == "1 new finding: Dataset is empty."
+
+
+def test_new_and_resolved_are_reported_together():
+    changes = diff_findings([_finding("a", ["x"])], [_finding("b", ["y"])])
+
+    assert "1 new finding" in changes["summary"]
+    assert "1 resolved" in changes["summary"]
+
+# --- fleet structure ------------------------------------------------------
+#
+# The structure check is the one instant check whose findings were computed
+# somewhere else — hierarchy.py, from parquet footers at discovery time.
+# It still obeys the catalogue's rule: a pure function over the two dicts
+# the app already has, with no I/O of its own.
+
+
+def test_structure_findings_are_surfaced_as_findings():
+    info = _dataset_info(10, [("id", "Int64", 0)])
+    # The check's precondition: a structure was detected at all.
+    info["capabilities"] = {"has_structure": True}
+    info["structure_findings"] = [
+        {
+            "check_id": "chunk_order_vs_time",
+            "severity": "warning",
+            "title": "Chunk order by name differs from time order",
+            "detail": "sys_key=123 / rec_b: ordered by footer timestamps instead.",
+            "columns": [],
+        }
+    ]
+
+    findings = _run(info, _chart_data())
+
+    assert "chunk_order_vs_time" in _ids(findings)
+    assert "footer timestamps" in next(
+        f for f in findings if f.check_id == "chunk_order_vs_time"
+    ).detail
+
+
+def test_a_flat_input_skips_the_structure_check_entirely():
+    """An input with no directory structure has nothing to say here — and
+    "skipped" is the honest answer, not a green tick claiming it was
+    examined for something it cannot have."""
+    results = run_instant_checks(_dataset_info(10, [("id", "Int64", 0)]), _chart_data())
+
+    structure = next(r for r in results if r["id"] == "structure")
+    assert structure["status"] == "skipped"
+    assert structure["reason"] == "needs a detected directory structure"
+    assert structure["findings"] == []

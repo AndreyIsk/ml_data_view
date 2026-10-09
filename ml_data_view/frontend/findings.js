@@ -125,6 +125,13 @@ function applyCheckResult(result) {
     status.textContent = "not run";
     return;
   }
+  if (result.status === "skipped") {
+    // Not a pass and not a failure. A check whose precondition this
+    // dataset does not have was never run, and a green tick here would
+    // claim it had been examined for something it cannot have.
+    status.textContent = result.reason ? `skipped — ${result.reason}` : "skipped";
+    return;
+  }
   if (result.status === "error") {
     // A check that could not run is not a check that passed, so it never
     // renders as a tick.
@@ -202,9 +209,65 @@ async function resetFindingsForDataset() {
   }
 }
 
+// What the last scan found that the one before it did not. Read by app.js
+// for the re-profile toast — computed in Python (findings.diff_findings)
+// and only stored here, so there is one definition of "new finding".
+let latestFindingChanges = null;
+
+// --- the grouping column ------------------------------------------------
+//
+// "A directory role, a hive key, or any column the user picks." The first
+// two arrive already chosen; the third is this control. A check that needs
+// a grouping column stays skipped until one exists, which is why this is
+// beside the checks rather than buried in Settings.
+async function refreshGroupingColumn() {
+  const wrapper = document.getElementById("findings-grouping");
+  const select = document.getElementById("grouping-column-select");
+  let capabilities;
+  try {
+    capabilities = await window.pywebview.api.get_capabilities();
+  } catch (err) {
+    wrapper.classList.add("hidden");
+    return;
+  }
+  const candidates = capabilities.grouping_candidates || [];
+  if (!candidates.length) {
+    wrapper.classList.add("hidden");
+    return;
+  }
+  select.replaceChildren();
+  const none = document.createElement("option");
+  none.value = "";
+  none.textContent = "Nothing — skip group checks";
+  select.appendChild(none);
+  for (const column of candidates) {
+    const option = document.createElement("option");
+    option.value = column;
+    option.textContent = column;
+    option.selected = column === capabilities.grouping_column;
+    select.appendChild(option);
+  }
+  wrapper.classList.remove("hidden");
+}
+
+document.getElementById("grouping-column-select").addEventListener("change", async (event) => {
+  await window.pywebview.api.set_grouping_column(event.target.value || null);
+  // Re-run rather than re-render: the group check's verdict depends on the
+  // column, so showing the old one beside the new selection would be
+  // showing an answer to a question nobody asked any more.
+  await runFindingsScan();
+  // And the same for the two tabs built on the same grouping. Rebuilding
+  // the comparison for a different level is arithmetic over statistics
+  // already stored — no profile is re-read — so there is no reason to
+  // leave them describing the level nobody chose.
+  await renderCatalogAndFleet();
+});
+
 // Called from app.js once the chart build has finished.
 async function runFindingsScan() {
+  await refreshGroupingColumn();
   const result = await window.pywebview.api.run_instant_checks();
+  latestFindingChanges = result.changes || null;
   if (result.error) {
     setInstantCheckNote(result.error);
     return;

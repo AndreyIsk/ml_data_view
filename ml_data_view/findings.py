@@ -40,6 +40,11 @@ CLASS_IMBALANCE = 0.9
 # Share of a column's DISTINCT values that occur exactly once, above which
 # the column is reporting identity rather than describing rows.
 ID_UNIQUE_SHARE = 0.9
+# How many times bigger the largest group must be than the smallest before
+# an imbalance is worth mentioning. Groups are rarely equal and a mild
+# difference is ordinary; an order of magnitude is where a figure compared
+# across them starts being a figure about the largest one.
+GROUP_BALANCE_RATIO = 10.0
 
 SEVERITIES = ("critical", "warning", "info")
 
@@ -54,6 +59,13 @@ class Finding:
 
     `columns` is the columns implicated — possibly several (correlated
     missingness), possibly none (the dataset itself is empty).
+
+    `unit` is the UNIT it is about, when it is about one — the same key
+    the time-series payload and the catalogue use ("123 / rec_a"), so a
+    catalogue row can find its own findings by equality rather than by
+    reading them out of the detail text. Empty for a finding about the
+    dataset as a whole, which is not a defect of some particular
+    recording and must not be counted against one.
     """
 
     check_id: str
@@ -61,6 +73,7 @@ class Finding:
     title: str
     detail: str
     columns: list[str] = field(default_factory=list)
+    unit: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -69,6 +82,7 @@ class Finding:
             "title": self.title,
             "detail": self.detail,
             "columns": list(self.columns),
+            "unit": self.unit,
         }
 
 
@@ -114,13 +128,38 @@ class CheckContext:
         value = self.chart_data.get(key)
         return value if isinstance(value, list) else []
 
+    @property
+    def capabilities(self) -> dict[str, Any]:
+        """What the loaded dataset can support, computed once per load by
+        api.py and carried here so a precondition stays a dict lookup
+        rather than a reason to give these checks I/O."""
+        value = self.dataset_info.get("capabilities")
+        return value if isinstance(value, dict) else {}
+
+    def capability(self, name: str) -> Any:
+        return self.capabilities.get(name)
+
 
 @dataclass
 class CheckSpec:
+    """One check, and what it needs before it means anything.
+
+    `applies` is the whole point of this field existing. Otter opens a
+    single CSV, a flat folder, a hive-partitioned tree or a fully mapped
+    one, and a check that only makes sense for some of those must SKIP on
+    the rest — not fail, and certainly not pass. A skipped check reports
+    `requires` so the tab can say what was missing, because "this check did
+    not run, and here is why" is information and a green tick is a lie.
+    """
+
     id: str
     title: str
     kind: str  # "instant" here; deep_checks.py carries the "deep" ones
     fn: Callable[[CheckContext], list[Finding]]
+    # None means "always applicable" — which is the right default: most
+    # checks read null counts and row counts, and every input has those.
+    applies: Callable[[CheckContext], bool] | None = None
+    requires: str = ""
 
 
 # --- the checks --------------------------------------------------------
@@ -421,7 +460,127 @@ def _column_order(ctx: CheckContext) -> Callable[[str], int]:
     return lambda name: order.get(name, len(order))
 
 
+def _check_structure(context: CheckContext) -> list[Finding]:
+    """Problems the directory structure itself reported (hierarchy.py).
+
+    Carried in `dataset_info` rather than recomputed, which keeps this
+    check inside the instant catalogue's rule: a pure function over two
+    dicts the app already has, no I/O and no polars. The work was done at
+    discovery time from parquet footers — a chunk whose schema deviates
+    from its series, a series whose filenames do not run in timestamp
+    order — and this is where the user is told about it.
+
+    Skipped entirely when no structure was detected, which is the common
+    case: a single file and a flat folder have no directory structure to
+    have problems with.
+    """
+    return [
+        Finding(
+            check_id=finding.get("check_id", "structure"),
+            severity=finding.get("severity", "warning"),
+            title=finding.get("title", "Structure problem"),
+            detail=finding.get("detail", ""),
+            columns=list(finding.get("columns") or []),
+        )
+        for finding in (context.dataset_info.get("structure_findings") or [])
+    ]
+
+
+def _check_timestamp_integrity(context: CheckContext) -> list[Finding]:
+    """Rows with no usable timestamp, in the column the dataset is ordered by.
+
+    A TIME-SERIES check: its precondition is a detected timestamp column,
+    and nothing else. It runs on a single CSV that happens to have one just
+    as readily as on a mapped tree, because "does this time column have
+    holes in it" is the same question either way — and a hole in a time
+    column is a different problem from a hole in any other, since
+    everything ordered by it is quietly wrong rather than merely missing.
+    """
+    column = context.capability("timestamp_column")
+    entry = next((c for c in context.columns if c.get("name") == column), None)
+    missing = int((entry or {}).get("null_count") or 0)
+    if not missing:
+        return []
+    share = missing / context.row_count if context.row_count else 0
+    return [
+        Finding(
+            check_id="timestamp_integrity",
+            severity="critical" if share >= 0.01 else "warning",
+            title="Timestamps are missing",
+            detail=(
+                f"{missing:,} of {context.row_count:,} rows ({share:.1%}) have no value in "
+                f"{column!r}, the column this dataset is ordered by. Anything derived from "
+                "time — ordering, gaps, rates — describes only the rows that have one."
+            ),
+            columns=[column],
+        )
+    ]
+
+
+def _check_group_balance(context: CheckContext) -> list[Finding]:
+    """Wildly uneven row counts across the grouping column's values.
+
+    A GROUP-COMPARISON check: its precondition is a grouping column, which
+    may come from a directory role, a hive key, or any column the user
+    nominated. Without one there are no groups to compare and this is
+    skipped — a dataset with nothing to group by is not an unbalanced one.
+    """
+    column = context.capability("grouping_column")
+    bar = next(
+        (b for b in context.payload("categorical_bars") if b.get("column") == column), None
+    )
+    if bar is None:
+        return []
+    counts = [
+        count
+        for value, count in zip(bar.get("categories") or [], bar.get("counts") or [])
+        if value != "Other"
+    ]
+    if len(counts) < 2 or not sum(counts):
+        return []
+    largest, smallest = max(counts), min(counts)
+    if smallest <= 0 or largest / smallest < GROUP_BALANCE_RATIO:
+        return []
+    return [
+        Finding(
+            check_id="group_balance",
+            severity="info",
+            title="Groups differ greatly in size",
+            detail=(
+                f"Grouped by {column!r}, the largest group has {largest:,} rows and the "
+                f"smallest {smallest:,} — a {largest / smallest:.0f}x difference. Any figure "
+                "compared across these groups is dominated by the largest."
+            ),
+            columns=[column],
+        )
+    ]
+
+
 INSTANT_CHECKS: list[CheckSpec] = [
+    CheckSpec(
+        "structure",
+        "Directory structure",
+        "instant",
+        _check_structure,
+        applies=lambda ctx: bool(ctx.capability("has_structure")),
+        requires="a detected directory structure",
+    ),
+    CheckSpec(
+        "timestamp_integrity",
+        "Timestamp integrity",
+        "instant",
+        _check_timestamp_integrity,
+        applies=lambda ctx: bool(ctx.capability("timestamp_column")),
+        requires="a timestamp column",
+    ),
+    CheckSpec(
+        "group_balance",
+        "Group sizes",
+        "instant",
+        _check_group_balance,
+        applies=lambda ctx: bool(ctx.capability("grouping_column")),
+        requires="a grouping column",
+    ),
     CheckSpec("empty_dataset", "Dataset has rows", "instant", _check_empty_dataset),
     CheckSpec("all_null_column", "Entirely-missing columns", "instant", _check_all_null_column),
     CheckSpec("high_missingness", "Mostly-missing columns", "instant", _check_high_missingness),
@@ -455,6 +614,23 @@ def run_instant_checks(
     results = []
     for spec in INSTANT_CHECKS:
         try:
+            if spec.applies is not None and not spec.applies(ctx):
+                # NOT a pass and NOT a failure. A check whose precondition
+                # is absent had nothing to look at, and saying so is the
+                # only honest answer — a green tick here would claim the
+                # dataset had been examined for something it cannot have.
+                results.append(
+                    {
+                        "id": spec.id,
+                        "title": spec.title,
+                        "kind": spec.kind,
+                        "status": "skipped",
+                        "findings": [],
+                        "error": None,
+                        "reason": f"needs {spec.requires}" if spec.requires else "not applicable",
+                    }
+                )
+                continue
             findings = spec.fn(ctx)
             results.append(
                 {
@@ -480,6 +656,30 @@ def run_instant_checks(
     return results
 
 
+# Families of checks registered here rather than defined here: each has
+# its own preconditions and its own module — time-series health in
+# ts_checks.py, group comparison in fleet_checks.py — and this is the
+# registry they join. Imported at the FOOT of this file because those
+# modules need CheckSpec, CheckContext and Finding, which are defined
+# above; the dependency runs one way.
+def _register(specs: list[CheckSpec]) -> None:
+    known = {spec.id for spec in INSTANT_CHECKS}
+    for spec in specs:
+        if spec.id not in known:
+            INSTANT_CHECKS.append(spec)
+
+
+def _register_external_checks() -> None:
+    from ml_data_view.fleet_checks import FLEET_CHECKS
+    from ml_data_view.ts_checks import TIMESERIES_CHECKS
+
+    _register(TIMESERIES_CHECKS)
+    _register(FLEET_CHECKS)
+
+
+_register_external_checks()
+
+
 def sorted_findings(results: list[dict[str, Any]]) -> list[Finding]:
     """Every finding across `results`, most severe first, catalogue order
     within a severity."""
@@ -497,3 +697,86 @@ def severity_summary(findings: list[Finding]) -> dict[str, int]:
         if finding.severity in summary:
             summary[finding.severity] += 1
     return summary
+
+
+# --- comparing one scan against the last -------------------------------
+#
+# A re-profile after new data arrives is only worth interrupting someone
+# for if something CHANGED. "12 findings" after every file lands is noise;
+# "1 new finding: high null rate in column X" is the thing they opened the
+# app for.
+
+
+def finding_key(finding: dict[str, Any]) -> tuple[str, str, tuple[str, ...]]:
+    """What makes two findings the same finding.
+
+    The check, the unit it is about, and the columns it implicates — not
+    the detail text, which carries counts that move with every new file.
+    "High null rate in column X" going from 41% to 43% is the same
+    finding, and reporting it as a new one would train people to ignore
+    the notification. The UNIT is part of the identity because the same
+    gap appearing in a second recording IS news.
+    """
+    return (
+        finding.get("check_id", ""),
+        str(finding.get("unit") or ""),
+        tuple(finding.get("columns") or []),
+    )
+
+
+def diff_findings(
+    previous: list[dict[str, Any]] | None, current: list[dict[str, Any]]
+) -> dict[str, Any] | None:
+    """What appeared and what went away since the last scan.
+
+    None when there IS no last scan — a first profile has nothing to
+    compare against, and calling every finding on a freshly opened dataset
+    "new" would make the word mean nothing.
+    """
+    if previous is None:
+        return None
+    before = {finding_key(f) for f in previous}
+    after = {finding_key(f) for f in current}
+    new = [f for f in current if finding_key(f) not in before]
+    resolved = [f for f in previous if finding_key(f) not in after]
+    return {
+        "new": new,
+        "resolved": resolved,
+        "summary": describe_finding_changes(new, resolved),
+    }
+
+
+def describe_finding_changes(
+    new: list[dict[str, Any]], resolved: list[dict[str, Any]]
+) -> str:
+    """One sentence for the re-profile notification.
+
+    Built here rather than in JS for the same reason load_stats.py builds
+    its line here: the omission rules are the content. Nothing new and
+    nothing resolved is "No new findings." — which is worth saying, because
+    it is the answer someone watching a pipeline most wants and is
+    otherwise indistinguishable from the check not having run.
+    """
+    parts = []
+    if new:
+        lead = f"{len(new)} new finding{'s' if len(new) != 1 else ''}"
+        parts.append(f"{lead}: {_name_finding(new[0])}" if len(new) == 1 else lead)
+    if resolved:
+        parts.append(f"{len(resolved)} resolved")
+    if not parts:
+        return "No new findings."
+    return " · ".join(parts) + "."
+
+
+def _name_finding(finding: dict[str, Any]) -> str:
+    """"high null rate in column X" — the title, and the column it is
+    about when there is exactly one. Several columns are named by count
+    instead: a notification that lists eight column names is not a
+    notification."""
+    title = (finding.get("title") or "").rstrip(".")
+    columns = finding.get("columns") or []
+    if len(columns) == 1:
+        return f"{title} in column {columns[0]}"
+    if len(columns) > 1:
+        return f"{title} across {len(columns)} columns"
+    return title

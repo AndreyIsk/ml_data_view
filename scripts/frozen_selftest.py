@@ -242,8 +242,13 @@ def _api():
     return f"{info['row_count']} rows, {critical} critical finding(s); stat line: {stat_line}"
 
 
-@check("Api: background jobs (folder load + chart build) on worker threads")
+@check("Api: background jobs run in a capped worker subprocess")
 def _jobs():
+    """The frozen-only risk this covers: a worker is started by re-running
+    sys.executable, which IS the app once packaged. If main.py's
+    --jobs-worker check fails to fire, every heavy operation silently opens
+    a second window instead of doing its work. That cannot be caught from
+    source, where the worker is a plain `python -m ml_data_view.jobs`."""
     import polars as pl
 
     from ml_data_view.api import Api
@@ -275,7 +280,87 @@ def _jobs():
     return f"folder load {rows} rows across 3 files; chart build ok; {done} deep checks ran"
 
 
+@check("memory ceiling is enforced by the OS")
+def _ceiling():
+    """A ceiling the app claims but cannot enforce is worse than none, and
+    whether pywin32's Job Object machinery survived bundling is exactly the
+    kind of thing that only shows up in the frozen build."""
+    from ml_data_view.jobs import Job, ceiling_status, default_memory_ceiling_mb
+
+    status = ceiling_status()
+    if not status["supported"]:
+        raise AssertionError(status["reason"])
+
+    job = Job(
+        "_memory_hog",
+        {"chunk_mb": 16, "max_chunks": 4096},
+        label="Ceiling probe",
+        limit_mb=2048,
+    )
+    job.start()
+    if not job.wait(timeout=180):
+        raise RuntimeError("the memory-hog job never settled")
+    state = job.progress()
+    if not state.get("ceiling_hit"):
+        raise AssertionError(f"a runaway job was not stopped by the ceiling: {state['stage']}")
+    if job.directory.exists():
+        raise AssertionError(f"temp directory survived a ceiling kill: {job.directory}")
+    return f"runaway stopped at a 2048 MB cap; default here is {default_memory_ceiling_mb()} MB"
+
+
 # --- 5. settings / audit log persistence --------------------------------
+
+
+@check("profile cache: sqlite store round-trips and invalidates")
+def _profile_cache():
+    """sqlite3 is stdlib, but its compiled _sqlite3 extension is a separate
+    binary that a bundle can leave out — and if it does, every folder open
+    fails in the frozen build alone."""
+    import polars as pl
+
+    from ml_data_view.profile_cache import SECTION_LOAD, ProfileCache
+
+    with tempfile.TemporaryDirectory() as tmp:
+        data = Path(tmp) / "part.parquet"
+        pl.DataFrame({"v": [1, 2, 3]}).write_parquet(data)
+        with ProfileCache(Path(tmp) / "cache.sqlite") as cache:
+            cache.put(data, {SECTION_LOAD: {"row_count": 3}})
+            if cache.get(data) is None:
+                raise AssertionError("a profile written to the cache did not come back")
+            # Rewrite the file: the entry must stop being served.
+            pl.DataFrame({"v": list(range(500))}).write_parquet(data)
+            if cache.get(data) is not None:
+                raise AssertionError("a changed file still served its old profile")
+            size = cache.size_bytes()
+    return f"round trip ok, invalidation ok, {size} bytes on disk"
+
+
+@check("watchdog: a real observer sees a file appear")
+def _watcher():
+    """watchdog picks its observer backend at RUNTIME, so nothing static
+    reaches watchdog.observers.winapi. A bundle that misses it builds
+    cleanly and then reports "Watching" forever without ever firing —
+    which is invisible from source, where the backend imports fine."""
+    import time
+
+    from ml_data_view.folder_watcher import FolderWatcher
+
+    with tempfile.TemporaryDirectory() as tmp:
+        folder = Path(tmp)
+        watcher = FolderWatcher(folder, lambda events: None, stability_seconds=60)
+        watcher.start()
+        try:
+            (folder / "arrived.parquet").write_bytes(b"not really parquet")
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline and not watcher.pending():
+                time.sleep(0.1)
+            pending = watcher.pending()
+            backend = type(watcher._observer).__name__ if watcher._observer else "NONE"
+        finally:
+            watcher.stop()
+    if not pending:
+        raise AssertionError(f"no filesystem event reached the watcher (observer: {backend})")
+    return f"{backend} reported {pending[0]['file']}"
 
 
 @check("settings round-trip in the per-user app-data dir")

@@ -73,11 +73,21 @@ def available_sections(chart_data: dict[str, Any]) -> dict[str, bool]:
         projection.get("x") for projection in chart_data.get("embedding_projections") or []
     )
     has_media = bool(chart_data.get("image_previews"))
+    # Health is offered on exactly the condition its checks declare: a
+    # timestamp column was detected and the analysis ran. No time axis, no
+    # section — rather than a section that says nothing.
+    has_health = bool((chart_data.get("timeseries") or {}).get("units"))
+    # The catalogue is offered above UNIT scope only. With one unit loaded
+    # there is one row, and the Recording Health section beside it already
+    # says everything that row would.
+    has_catalog = len(((chart_data.get("catalog") or {}).get("rows")) or []) > 1
     return {
         "overview": True,
         "distributions": has_distributions,
         "embeddings": has_embeddings,
         "media": has_media,
+        "health": has_health,
+        "catalog": has_catalog,
     }
 
 
@@ -243,6 +253,263 @@ def _media_grid_flowables(preview: dict[str, Any], heading_style, body_style) ->
     ]
 
 
+def _seconds(value: Any) -> str:
+    """A duration as a reader says it. Shared shape with ts_checks._seconds;
+    duplicated rather than imported because the report deliberately depends
+    on nothing in the findings layer."""
+    if value is None:
+        return "—"
+    if value < 1:
+        return f"{value * 1000:.0f}ms"
+    if value < 90:
+        return f"{value:.2f}s"
+    minutes, seconds = divmod(value, 60)
+    return f"{int(minutes)}m {seconds:04.1f}s"
+
+
+def _health_flowables(
+    timeseries: dict[str, Any], heading_style, sub_heading_style, body_style
+) -> list:
+    """Recording Health: a rollup, then one row per unit.
+
+    ROLLUP FIRST, because at anything above recording scope that is the
+    answer — "three of nineteen recordings are missing a chunk" is what a
+    reader wants before the table, and at recording scope the rollup is a
+    single row that says the same thing as the table beneath it.
+
+    Every figure here was computed during the chart build and cached per
+    chunk; nothing is read to produce this section.
+    """
+    units = timeseries.get("units") or {}
+    if not units:
+        return []
+
+    story = [Paragraph("Recording Health", heading_style)]
+    column = timeseries.get("timestamp_column")
+    story.append(
+        Paragraph(
+            f"Ordered by <b>{column}</b>. "
+            f"{len(units)} recording(s); "
+            f"{len(timeseries.get('channels_analysed') or [])} channel(s) analysed"
+            + (
+                f", {len(timeseries.get('channels_skipped') or [])} beyond the configured limit"
+                if timeseries.get("channels_skipped")
+                else ""
+            )
+            + ".",
+            body_style,
+        )
+    )
+
+    totals = {
+        "missing chunks": 0,
+        "overlaps": 0,
+        "backwards steps": 0,
+        "gaps": 0,
+        "duplicate stamps": 0,
+    }
+    affected = {key: 0 for key in totals}
+    rows = [["Recording", "Rows", "Duration", "Rate", "Gaps", "Missing", "Overlap", "Back"]]
+    for unit_id, unit in sorted(units.items()):
+        gaps = unit.get("gaps") or []
+        missing = sum(1 for gap in gaps if gap.get("at_boundary"))
+        ordinary = len(gaps) - missing
+        counts = {
+            "missing chunks": missing,
+            "overlaps": len(unit.get("overlaps") or []),
+            "backwards steps": unit.get("backwards") or 0,
+            "gaps": ordinary,
+            "duplicate stamps": unit.get("duplicates") or 0,
+        }
+        for key, value in counts.items():
+            totals[key] += value
+            affected[key] += 1 if value else 0
+        rows.append(
+            [
+                unit_id,
+                f"{unit.get('rows', 0):,}",
+                _seconds(unit.get("duration")),
+                f"{unit['hz']:.1f}Hz" if unit.get("hz") else "—",
+                str(ordinary),
+                str(missing),
+                str(counts["overlaps"]),
+                str(counts["backwards steps"]),
+            ]
+        )
+
+    summary = ", ".join(
+        f"{affected[key]} of {len(units)} with {key}" for key in totals if totals[key]
+    )
+    story.append(
+        Paragraph(
+            f"<b>Rollup:</b> {summary}." if summary else "<b>Rollup:</b> nothing to report.",
+            body_style,
+        )
+    )
+    story.append(Spacer(1, 8))
+
+    table = Table(rows, hAlign="LEFT")
+    table.setStyle(
+        TableStyle(
+            [
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("FONTSIZE", (0, 0), (-1, -1), 8),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+                ("TOPPADDING", (0, 0), (-1, -1), 3),
+                ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#d0d0d0")),
+                ("ALIGN", (1, 1), (-1, -1), "RIGHT"),
+            ]
+        )
+    )
+    story.append(table)
+    return story
+
+
+def _bytes(value: Any) -> str:
+    if value is None:
+        return "—"
+    size = float(value)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if size < 1024 or unit == "TB":
+            return f"{size:,.0f} {unit}" if unit == "B" else f"{size:,.1f} {unit}"
+        size /= 1024
+    return f"{size:,.1f} TB"
+
+
+def _catalog_flowables(
+    chart_data: dict[str, Any], heading_style, sub_heading_style, body_style
+) -> list:
+    """The catalogue as a SUMMARY, not as a table of every row.
+
+    A fleet of nineteen systems and two hundred recordings is a report
+    nobody prints. What a reader wants above unit scope is the top-level
+    numbers, a line per group, and then the recordings that are actually
+    unhealthy — so that is what this is: totals, groups, and the unhealthy
+    rows named. The full table is one CSV export away, which is the right
+    place for two hundred rows.
+
+    Every figure was computed during the chart build from cached per-file
+    statistics; nothing is read to produce this section.
+    """
+    catalog = chart_data.get("catalog") or {}
+    rows = catalog.get("rows") or []
+    if not rows:
+        return []
+
+    unit_label = catalog.get("unit_label") or "Unit"
+    totals = catalog.get("totals") or {}
+    story = [Paragraph(f"{_plural(unit_label)} catalogue", heading_style)]
+    story.append(
+        Paragraph(
+            f"{totals.get('unit_count', len(rows)):,} {_plural(unit_label).lower()}, "
+            f"{totals.get('chunk_count', 0):,} chunk(s), "
+            f"{_count(totals.get('rows'))} row(s), "
+            f"{_seconds(totals.get('duration'))} of data, "
+            f"{_bytes(totals.get('bytes'))} on disk.",
+            body_style,
+        )
+    )
+
+    breakdown = catalog.get("health") or {}
+    named = ", ".join(
+        f"{breakdown[key]} {key}" for key in ("critical", "warning", "info", "ok")
+        if breakdown.get(key)
+    )
+    if named:
+        story.append(Paragraph(f"<b>Health:</b> {named}.", body_style))
+    story.append(Spacer(1, 8))
+
+    groups = catalog.get("groups") or []
+    if groups:
+        group_label = (catalog.get("group_labels") or ["Group"])[0]
+        story.append(Paragraph(f"By {group_label.lower()}", sub_heading_style))
+        table = [[group_label, _plural(unit_label), "Rows", "Duration", "Health"]]
+        for group in groups:
+            health = group.get("health") or {}
+            worst = next(
+                (key for key in ("critical", "warning", "info") if health.get(key)), "ok"
+            )
+            table.append(
+                [
+                    str(group.get("value")),
+                    f"{group.get('unit_count', 0):,}",
+                    _count(group.get("rows")),
+                    _seconds(group.get("duration")),
+                    f"{worst} ({health.get(worst, 0)})" if worst != "ok" else "ok",
+                ]
+            )
+        story.append(_grid(table))
+        story.append(Spacer(1, 8))
+
+    unhealthy = [
+        row for row in rows if (row.get("health") or {}).get("status") not in (None, "ok")
+    ]
+    story.append(
+        Paragraph(
+            f"Unhealthy {_plural(unit_label).lower()}"
+            + (f" — {len(unhealthy)} of {len(rows)}" if unhealthy else ""),
+            sub_heading_style,
+        )
+    )
+    if not unhealthy:
+        story.append(
+            Paragraph(
+                f"None. Every {unit_label.lower()} passed every check that applied to it.",
+                body_style,
+            )
+        )
+        return story
+
+    table = [[unit_label, "Chunks", "Rows", "Duration", "Gaps", "Health"]]
+    for row in unhealthy:
+        health = row.get("health") or {}
+        table.append(
+            [
+                row.get("label", ""),
+                f"{row.get('chunk_count', 0):,}",
+                _count(row.get("rows")),
+                _seconds(row.get("duration")),
+                "—" if row.get("gap_count") is None else f"{row['gap_count']:,}",
+                f"{health.get('status')} ({health.get('count', 0)})",
+            ]
+        )
+    story.append(_grid(table))
+    return story
+
+
+def _plural(word: str) -> str:
+    """A label's plural, for a heading. Naive on purpose — the labels are
+    the user's own words and a real pluraliser would still get some of
+    them wrong; this at least never turns "Series" into "Seriess"."""
+    lowered = word.lower()
+    if lowered.endswith(("s", "x", "z", "ch", "sh")):
+        return word
+    if lowered.endswith("y") and not lowered.endswith(("ay", "ey", "iy", "oy", "uy")):
+        return f"{word[:-1]}ies"
+    return f"{word}s"
+
+
+def _count(value: Any) -> str:
+    return "unknown" if value is None else f"{value:,}"
+
+
+def _grid(rows: list[list[str]]) -> Table:
+    table = Table(rows, hAlign="LEFT")
+    table.setStyle(
+        TableStyle(
+            [
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("FONTSIZE", (0, 0), (-1, -1), 8),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+                ("TOPPADDING", (0, 0), (-1, -1), 3),
+                ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#d0d0d0")),
+                ("ALIGN", (1, 1), (-1, -1), "RIGHT"),
+            ]
+        )
+    )
+    return table
+
+
 def generate_report(
     output_path: str | Path,
     *,
@@ -255,9 +522,9 @@ def generate_report(
     """Write a PDF report to `output_path`.
 
     `sections` is any subset of ("overview", "distributions", "embeddings",
-    "media"); a section is only actually included if available_sections()
-    also finds content for it — requesting an unavailable section is a
-    silent no-op for that section, not an error.
+    "media", "health", "catalog"); a section is only actually included if
+    available_sections() also finds content for it — requesting an
+    unavailable section is a silent no-op for that section, not an error.
     """
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -321,6 +588,17 @@ def generate_report(
                 text_length_histogram_figure(chart, GRID_CHART_PX_WIDTH, GRID_CHART_PX_HEIGHT)
             )
         story += _chart_grid_flowable([fig for fig in grid_figures if fig is not None])
+
+    # The catalogue before the per-recording health section: it is the
+    # wider view, and a reader coming to a fleet report wants "how many of
+    # these are wrong" before "here is every one of them".
+    if "catalog" in include:
+        story += _catalog_flowables(chart_data, heading_style, sub_heading_style, body_style)
+
+    if "health" in include:
+        story += _health_flowables(
+            chart_data.get("timeseries") or {}, heading_style, sub_heading_style, body_style
+        )
 
     if "embeddings" in include:
         story.append(Paragraph("Embeddings", heading_style))

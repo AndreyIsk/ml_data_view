@@ -198,12 +198,27 @@ def scan_folder(root: str | Path) -> FolderScanResult:
     return FolderScanResult(groups=groups, unreadable=unreadable)
 
 
+def load_files(files: list[Path]) -> pl.LazyFrame:
+    """Combine `files` into a single LazyFrame via pl.concat(...,
+    how="vertical") — lazy, so this doesn't read any row data itself.
+    Handed unchanged to the same chart/table/embedding/media code
+    single-file loads already use (see chart_data.py et al.).
+
+    Separate from load_group() because a file LIST is what travels: a
+    worker subprocess rebuilds the loaded dataset from paths in its job
+    spec (jobs.py), and a stopped load is adopted from the files it
+    actually finished, not from the group it started with.
+    """
+    if not files:
+        raise ValueError("Cannot load an empty file list.")
+    scans = [_dispatch_scanner(Path(f), Path(f).suffix.lower()) for f in files]
+    if len(scans) == 1:
+        return scans[0]
+    return pl.concat(scans, how="vertical")
+
+
 def load_group(group: SchemaGroup) -> pl.LazyFrame:
-    """Combine a schema group's files into a single LazyFrame via
-    pl.concat(..., how="vertical") — lazy, so this doesn't read any row
-    data itself. Handed unchanged to the same chart/table/embedding/media
-    code single-file loads already use (see chart_data.py et al.)."""
+    """load_files() for a discovered schema group."""
     if not group.files:
         raise ValueError("Cannot load an empty schema group (no files).")
-    scans = [_dispatch_scanner(f, f.suffix.lower()) for f in group.files]
-    return pl.concat(scans, how="vertical")
+    return load_files(group.files)

@@ -1,10 +1,13 @@
 import json
+import time
 
 import polars as pl
+import pytest
 
 from ml_data_view import load_stats
 from ml_data_view.api import Api
 from ml_data_view.audit_log import audit_log_file_path
+from ml_data_view.jobs import memory_ceiling_supported
 from ml_data_view.settings import DEFAULT_BANNER_COLOR, settings_file_path
 
 
@@ -232,7 +235,16 @@ def test_get_report_sections_reflects_the_loaded_dataset(tmp_path):
     api.get_chart_data()
     result = api.get_report_sections()
 
-    assert result == {"overview": True, "distributions": True, "embeddings": False, "media": False}
+    assert result == {
+        "overview": True,
+        "distributions": True,
+        "embeddings": False,
+        "media": False,
+        # No timestamp column in this dataset, so no Health section.
+        "health": False,
+        # One file is one catalogue row, which is not a catalogue.
+        "catalog": False,
+    }
 
 
 def test_generate_report_returns_error_when_nothing_loaded(tmp_path):
@@ -928,7 +940,14 @@ def test_list_checks_returns_the_full_catalogue_before_any_dataset_is_loaded(tmp
 
     checks = api.list_checks()["checks"]
 
-    assert [c["id"] for c in checks][:3] == ["empty_dataset", "all_null_column", "high_missingness"]
+    assert [c["id"] for c in checks][:3] == [
+        "structure",
+        "timestamp_integrity",
+        "group_balance",
+    ]
+    # Every conditional check carries the reason it might not run, so the
+    # tab can say what was missing rather than showing a green tick.
+    assert all(c["id"] and c["title"] for c in checks)
     assert {c["kind"] for c in checks} == {"instant", "deep"}
 
 
@@ -976,7 +995,17 @@ def test_run_instant_checks_reports_a_clean_dataset_as_clean(tmp_path):
     result = api.run_instant_checks()
 
     assert result["summary"] == {"critical": 0, "warning": 0, "info": 0}
-    assert all(c["status"] == "done" for c in result["checks"])
+    # A flat CSV with no time column satisfies none of the four
+    # preconditions, so those four are skipped and the rest pass. Neither
+    # counts as a failure.
+    assert all(c["status"] in ("done", "skipped") for c in result["checks"])
+    # This CSV has no time column, no structure and no grouping column, so
+    # every check with a precondition is skipped — and skipped is neither
+    # a pass nor a failure.
+    from ml_data_view.findings import INSTANT_CHECKS
+
+    conditional = {spec.id for spec in INSTANT_CHECKS if spec.applies is not None}
+    assert {c["id"] for c in result["checks"] if c["status"] == "skipped"} == conditional
 
 
 def test_start_deep_checks_requires_a_dataset(tmp_path):
@@ -1035,3 +1064,314 @@ def test_deep_checks_see_the_folder_file_list(tmp_path):
     assert sentinel["status"] == "done"
     # 5 sentinels per file across 2 files, counted exactly.
     assert "10" in sentinel["findings"][0]["detail"]
+
+
+# --- background jobs (ml_data_view/jobs.py) ---------------------------
+#
+# Heavy work runs in a capped worker subprocess, so these spawn real
+# processes. What is being checked here is the API SURFACE the frontend
+# talks to: that it answers while a job runs, that a running job is
+# listable and cancellable, and that a ceiling hit arrives as a message
+# rather than as an exception through the js_api bridge.
+
+
+def _slow_job(api, steps=400, step_seconds=0.05):
+    """A real background job that runs long enough to poll against, started
+    through the same path every feature uses."""
+    return api._start_job(
+        "_slow_loop",
+        {"steps": steps, "step_seconds": step_seconds},
+        label="Ticking",
+        files_total=steps,
+    )
+
+
+def test_list_jobs_is_empty_before_anything_runs(tmp_path):
+    assert Api(settings_dir=tmp_path).list_jobs() == {"jobs": []}
+
+
+def test_the_api_keeps_answering_while_a_job_runs(tmp_path):
+    """The main thread must never block. This exercises the POLLING path —
+    what the UI actually calls every 500ms — not just the job itself: if
+    list_jobs() waited on the worker in any way, the window would freeze
+    for exactly as long as the work took.
+    """
+    api = Api(settings_dir=tmp_path)
+    job = _slow_job(api)
+    try:
+        time.sleep(1.5)  # let the worker get going
+
+        slowest = 0.0
+        for _ in range(10):
+            started_at = time.monotonic()
+            listed = api.list_jobs()
+            api.get_settings()
+            api.get_chart_build_progress()
+            slowest = max(slowest, time.monotonic() - started_at)
+            assert len(listed["jobs"]) == 1
+
+        assert slowest < 1.0, f"a UI poll took {slowest:.2f}s while a job was running"
+    finally:
+        job.cancel()
+        job.wait(30)
+
+
+def test_a_running_job_is_listed_with_progress_and_an_eta(tmp_path):
+    api = Api(settings_dir=tmp_path)
+    job = _slow_job(api)
+    try:
+        time.sleep(2.5)
+        listed = api.list_jobs()["jobs"]
+
+        assert len(listed) == 1
+        entry = listed[0]
+        assert entry["title"] == "Ticking"
+        assert entry["files_total"] == 400
+        assert entry["files_done"] > 0
+        assert entry["fraction"] > 0
+        assert entry["eta_label"], "per-file throughput is known here, so an ETA must be offered"
+    finally:
+        job.cancel()
+        job.wait(30)
+
+
+def test_cancel_job_stops_the_job_the_indicator_named(tmp_path):
+    api = Api(settings_dir=tmp_path)
+    job = _slow_job(api)
+    time.sleep(1.5)
+    job_id = api.list_jobs()["jobs"][0]["id"]
+
+    assert api.cancel_job(job_id) == {"cancelled": True}
+    assert job.wait(30)
+    assert job.progress()["cancelled"] is True
+    assert api.list_jobs() == {"jobs": []}
+
+
+def test_cancelling_a_job_that_already_finished_is_an_error_not_a_crash(tmp_path):
+    """The indicator polls on a timer, so a Cancel click can always land
+    after the job it named has gone."""
+    api = Api(settings_dir=tmp_path)
+
+    assert "error" in api.cancel_job("no-such-job")
+
+
+def test_a_chart_build_runs_under_the_configured_ceiling(tmp_path):
+    """The ceiling is not a fixed constant of the runner — it is whatever
+    Settings resolves to at the moment the job starts."""
+    parquet_path = tmp_path / "data.parquet"
+    pl.DataFrame({"v": list(range(50))}).write_parquet(parquet_path)
+
+    api = Api(settings_dir=tmp_path)
+    api.save_settings({"memory_ceiling_mb": 3072})
+    api.load_file(str(parquet_path))
+    api.start_chart_build()
+
+    assert api._chart_build_job.limit_mb == 3072
+    api.wait_for_chart_build(timeout=180)
+
+
+def test_a_ceiling_hit_reaches_the_api_as_a_message(tmp_path):
+    """Surfaced through the same progress dict every other outcome uses, so
+    the frontend needs no special case and nothing raises across the js_api
+    bridge."""
+    if not memory_ceiling_supported():
+        pytest.skip("no OS-enforced memory ceiling on this platform")
+
+    api = Api(settings_dir=tmp_path)
+    job = api._start_job(
+        "_memory_hog",
+        {"chunk_mb": 16, "max_chunks": 4096},
+        label="Allocating",
+    )
+    job.wait(180)
+    state = job.progress()
+
+    assert state["ceiling_hit"] is True
+    assert "Raise the limit in Settings or narrow the selection." in state["error"]
+
+
+def test_settings_expose_the_ceiling_and_whether_it_is_enforced(tmp_path):
+    settings = Api(settings_dir=tmp_path).get_settings()
+
+    assert settings["memory_ceiling_mb"] is None  # automatic until the user picks one
+    assert settings["memory_ceiling_effective_mb"] >= settings["memory_ceiling_min_mb"]
+    assert settings["memory_ceiling_default_mb"] >= 2048
+    assert "supported" in settings["memory_ceiling_status"]
+
+
+def test_a_folder_load_reports_its_peak_against_the_ceiling(tmp_path):
+    """The stat line's memory clause changes meaning when a load ran as a
+    job: it is that one job's peak measured by the Job Object, not this
+    process's all-time high-water mark."""
+    if not memory_ceiling_supported():
+        pytest.skip("no OS-enforced memory ceiling on this platform")
+
+    folder = _make_folder(tmp_path)
+    api = Api(settings_dir=tmp_path)
+    api.discover_folder(str(folder))
+    api.start_folder_load(0)
+    state = api.wait_for_folder_load(timeout=120)
+
+    stats = state["result"]["load_stats"]
+    assert stats["ceiling_bytes"] == api._ceiling_mb() * 1024 * 1024
+    assert stats["peak_bytes"] > 0
+    assert "ceiling" in stats["line"]
+    assert "(process)" not in stats["line"]
+
+
+def test_a_folder_load_rebuilds_the_dataset_from_the_files_the_worker_used(tmp_path):
+    """The worker holding the original frame is gone by the time its result
+    is adopted, so the frame is rebuilt from the file list it reports —
+    which after a stop is the files that finished, not the whole group."""
+    folder = _make_folder(tmp_path, file_count=4)
+    api = Api(settings_dir=tmp_path)
+    api.discover_folder(str(folder))
+    api.start_folder_load(0)
+    state = api.wait_for_folder_load(timeout=120)
+
+    used = state["result"]["used_files"]
+    assert len(used) == len(api._current_files) == 4
+    assert [str(f) for f in api._current_files] == used
+    assert api.get_chart_data().get("error") is None
+
+# --- the profiling cache ----------------------------------------------
+
+
+def _cache_folder(tmp_path, file_count=4, rows=40):
+    folder = tmp_path / "cached"
+    folder.mkdir()
+    for index in range(file_count):
+        pl.DataFrame(
+            {
+                "id": list(range(rows)),
+                "label": [f"c{n % 3}" for n in range(rows)],
+                "score": [float(n + index) for n in range(rows)],
+            }
+        ).write_parquet(folder / f"part{index}.parquet")
+    return folder
+
+
+def _load_folder(api, folder):
+    api.discover_folder(str(folder))
+    api.start_folder_load(0)
+    return api.wait_for_folder_load(timeout=180)
+
+
+def test_cache_info_is_empty_before_anything_is_profiled(tmp_path):
+    info = Api(settings_dir=tmp_path).get_cache_info()
+
+    assert info["entries"] == 0
+    assert info["size_label"]
+    assert info["path"].endswith("profile_cache.sqlite")
+
+
+def test_opening_a_folder_fills_the_cache(tmp_path):
+    folder = _cache_folder(tmp_path)
+    api = Api(settings_dir=tmp_path)
+
+    _load_folder(api, folder)
+
+    assert api.get_cache_info()["entries"] == 4
+
+
+def test_reopening_a_folder_says_how_much_came_from_cache(tmp_path):
+    """The stat line is where an incremental open becomes visible. A load
+    that silently got faster is indistinguishable from one that silently
+    did less."""
+    folder = _cache_folder(tmp_path)
+    _load_folder(Api(settings_dir=tmp_path), folder)
+
+    second = Api(settings_dir=tmp_path)
+    state = _load_folder(second, folder)
+    stats = state["result"]["load_stats"]
+
+    assert stats["files_from_cache"] == 4
+    assert stats["files_scanned"] == 0
+    assert "0 of 4 files profiled, 4 from cache" in stats["line"]
+
+
+def test_a_first_open_reports_no_cache_contribution(tmp_path):
+    folder = _cache_folder(tmp_path)
+    api = Api(settings_dir=tmp_path)
+
+    state = _load_folder(api, folder)
+    stats = state["result"]["load_stats"]
+
+    assert stats["files_from_cache"] == 0
+    assert "from cache" not in stats["line"]
+
+
+def test_adding_a_file_reprofiles_only_it(tmp_path):
+    folder = _cache_folder(tmp_path)
+    _load_folder(Api(settings_dir=tmp_path), folder)
+
+    pl.DataFrame(
+        {"id": [1, 2], "label": ["c0", "c1"], "score": [1.0, 2.0]}
+    ).write_parquet(folder / "part9.parquet")
+
+    state = _load_folder(Api(settings_dir=tmp_path), folder)
+    stats = state["result"]["load_stats"]
+
+    assert stats["files_scanned"] == 1
+    assert stats["files_from_cache"] == 4
+
+
+def test_clear_cache_empties_it_and_reports_what_went(tmp_path):
+    folder = _cache_folder(tmp_path)
+    api = Api(settings_dir=tmp_path)
+    _load_folder(api, folder)
+
+    result = api.clear_cache()
+
+    assert result["removed"] == 4
+    assert result["entries"] == 0
+    assert api.get_cache_info()["entries"] == 0
+
+
+def test_force_full_reprofile_rereads_the_loaded_folder(tmp_path):
+    folder = _cache_folder(tmp_path)
+    api = Api(settings_dir=tmp_path)
+    _load_folder(api, folder)
+    # Warm: a plain re-open would now read nothing.
+    assert _load_folder(api, folder)["result"]["load_stats"]["files_from_cache"] == 4
+
+    started = api.force_full_reprofile()
+    state = api.wait_for_folder_load(timeout=180)
+
+    assert started["started"] is True
+    assert state["result"]["load_stats"]["files_scanned"] == 4
+    assert state["result"]["load_stats"]["files_from_cache"] == 0
+
+
+def test_force_full_reprofile_needs_a_loaded_folder(tmp_path):
+    assert "error" in Api(settings_dir=tmp_path).force_full_reprofile()
+
+
+def test_settings_carry_the_cache_facts(tmp_path):
+    settings = Api(settings_dir=tmp_path).get_settings()
+
+    assert "entries" in settings["cache"]
+    assert "size_label" in settings["cache"]
+
+
+def test_a_cached_reopen_produces_the_same_charts(tmp_path):
+    """Fast is worthless if it is different. The cached path and the direct
+    one are pinned against each other in tests/test_file_profile.py; this
+    checks the same thing survives the whole Api round trip, worker
+    subprocess included."""
+    folder = _cache_folder(tmp_path)
+
+    first = Api(settings_dir=tmp_path)
+    _load_folder(first, folder)
+    first.start_chart_build()
+    cold = first.wait_for_chart_build(timeout=300)["result"]
+
+    second = Api(settings_dir=tmp_path)
+    _load_folder(second, folder)
+    second.start_chart_build()
+    warm = second.wait_for_chart_build(timeout=300)["result"]
+
+    for key in ["numeric_histograms", "categorical_bars", "text_length_histograms"]:
+        assert warm[key] == cold[key], key
+    assert warm["cache_stats"]["files_from_cache"] == 4
+    assert cold["cache_stats"]["files_scanned"] == 4

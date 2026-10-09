@@ -61,6 +61,10 @@ _INTEGER_DTYPES = {
 }
 _FLOAT_DTYPES = {pl.Float32, pl.Float64}
 _STRING_DTYPES = {pl.String, pl.Utf8}
+# Compared against a real datetime, not against the text of one: polars
+# will not order a Datetime column against a string, and the timeline's
+# "search this window" hands over an instant rather than a label.
+_TEMPORAL_DTYPES = {pl.Datetime, pl.Date}
 
 
 class SearchConditionError(ValueError):
@@ -93,11 +97,35 @@ class Condition:
         )
 
 
-def _scan(path: Path) -> pl.LazyFrame:
+def _scan(path: Path, identity: dict[str, dict[str, Any]] | None = None) -> pl.LazyFrame:
     """Lazily scan one source file. Routed through data_loader's dispatcher
-    so .csv/.arrow work here exactly as .parquet does."""
+    so .csv/.arrow work here exactly as .parquet does.
+
+    `identity` attaches the derived columns for a structured folder
+    (hierarchy.py) to THIS file's scan, which is what keeps searching by a
+    group or a unit as fast as searching by anything else: the alternative
+    — filtering the whole concatenated frame — would forfeit the per-file
+    early exit that makes a folder search return in milliseconds.
+
+    The column NAMES come from the row, because they come from the mapping:
+    a hive level called `sys_key` contributes a column called `sys_key`, so
+    nothing here can name them in advance.
+    """
     path = Path(path)
-    return _dispatch_scanner(path, path.suffix.lower())
+    scan = _dispatch_scanner(path, path.suffix.lower())
+    row = (identity or {}).get(str(path))
+    if row is None:
+        return scan
+    from ml_data_view.hierarchy import CHUNK_INDEX_COLUMN
+
+    literals = [
+        pl.lit(
+            value, dtype=pl.Int32 if name.endswith(CHUNK_INDEX_COLUMN) else pl.String
+        ).alias(name)
+        for name, value in row.items()
+        if name != "file"
+    ]
+    return scan.with_columns(*literals)
 
 
 def _coerce(value: str, dtype: pl.DataType, index: int, column: str) -> Any:
@@ -121,6 +149,15 @@ def _coerce(value: str, dtype: pl.DataType, index: int, column: str) -> Any:
             raise SearchConditionError(
                 index, f"{column!r} holds numbers, so {value!r} is not a valid value."
             ) from None
+    if dtype in _TEMPORAL_DTYPES or getattr(dtype, "base_type", lambda: None)() in _TEMPORAL_DTYPES:
+        parsed = _parse_instant(value)
+        if parsed is None:
+            raise SearchConditionError(
+                index,
+                f"{column!r} holds timestamps, so {value!r} is not a valid value — "
+                "use an ISO date or date and time, e.g. 2026-03-01 14:30:00.",
+            )
+        return parsed
     if dtype == pl.Boolean:
         lowered = str(value).strip().lower()
         if lowered in ("true", "1", "yes"):
@@ -131,6 +168,26 @@ def _coerce(value: str, dtype: pl.DataType, index: int, column: str) -> Any:
             index, f"{column!r} is true/false, so {value!r} is not a valid value."
         )
     return value
+
+
+def _parse_instant(value: Any):
+    """An ISO-8601 date or timestamp, as a datetime. None when it is not one.
+
+    Deliberately narrow: a timestamp column is ordered, so a value that
+    cannot be placed on that order is a mistake rather than something to
+    guess at — the same strictness _coerce applies to every other dtype.
+    """
+    from datetime import date, datetime
+
+    if isinstance(value, (datetime, date)):
+        return value
+    text = str(value).strip().replace("Z", "+00:00")
+    for parse in (datetime.fromisoformat, date.fromisoformat):
+        try:
+            return parse(text)
+        except (TypeError, ValueError):
+            continue
+    return None
 
 
 def _condition_expr(condition: Condition, dtype: pl.DataType, index: int) -> pl.Expr:
@@ -206,6 +263,7 @@ def search_rows(
     predicate: pl.Expr,
     columns: list[str] | None = None,
     limit: int = SEARCH_ROW_LIMIT,
+    identity: dict[str, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """The first `limit` matching rows, in file order.
 
@@ -220,7 +278,7 @@ def search_rows(
         if remaining <= 0:
             break
         matched = (
-            _projected(_scan(file), columns)
+            _projected(_scan(file, identity), columns)
             .filter(predicate)
             .head(remaining)
             .collect(engine="streaming")
@@ -234,6 +292,7 @@ def count_matches(
     predicate: pl.Expr,
     on_progress: Callable[[int, Path], None] | None = None,
     should_cancel: Callable[[], bool] | None = None,
+    identity: dict[str, dict[str, Any]] | None = None,
 ) -> int:
     """Total matching rows across every file.
 
@@ -247,7 +306,9 @@ def count_matches(
     for index, file in enumerate(files):
         if should_cancel is not None and should_cancel():
             break
-        matched = _scan(file).filter(predicate).select(pl.len()).collect(engine="streaming")
+        matched = (
+            _scan(file, identity).filter(predicate).select(pl.len()).collect(engine="streaming")
+        )
         total += int(matched[0, 0])
         if on_progress is not None:
             on_progress(index, file)
@@ -261,6 +322,7 @@ def export_matches(
     out_path: str | Path,
     on_progress: Callable[[int, Path], None] | None = None,
     should_cancel: Callable[[], bool] | None = None,
+    identity: dict[str, dict[str, Any]] | None = None,
 ) -> Path:
     """Write every matching row to CSV.
 
@@ -277,7 +339,7 @@ def export_matches(
             if should_cancel is not None and should_cancel():
                 break
             matched = (
-                _projected(_scan(file), columns)
+                _projected(_scan(file, identity), columns)
                 .filter(predicate)
                 .collect(engine="streaming")
             )

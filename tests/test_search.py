@@ -202,7 +202,11 @@ def test_search_rows_stops_opening_files_once_the_limit_is_reached(tmp_path, mon
     opened = []
     real_scan = search_module._scan
     monkeypatch.setattr(
-        search_module, "_scan", lambda path: (opened.append(path), real_scan(path))[1]
+        search_module,
+        "_scan",
+        # `identity` carries a structured folder's derived columns
+        # (hierarchy.py); this test is about which files get opened.
+        lambda path, identity=None: (opened.append(path), real_scan(path, identity))[1],
     )
 
     search_rows(files, predicate, limit=10)

@@ -1,9 +1,21 @@
-"""Entry point — launches the pywebview window."""
+"""Entry point — launches the pywebview window, or runs a background job.
+
+Both roles live here because in a frozen build there is only one
+executable: `sys.executable` IS the app, so a worker subprocess (jobs.py)
+can only be started by re-running it, and without the check below that
+would open a second window instead of doing the work. From source the
+worker is reached as `python -m ml_data_view.jobs` and never comes
+through here — but the flag is honoured either way, so the two builds
+behave identically.
+"""
 from __future__ import annotations
+
+import sys
 
 import webview
 
 from ml_data_view.api import Api
+from ml_data_view.jobs import WORKER_FLAG, run_worker
 from ml_data_view.resources import resource_path
 
 # Resolved through resource_path so these work both from source and from
@@ -20,6 +32,11 @@ ICON_PATH = resource_path("assets", "otter.ico")
 
 
 def main() -> None:
+    # Before anything that would put a window on screen, and before the
+    # heavier imports a window needs.
+    if len(sys.argv) > 2 and sys.argv[1] == WORKER_FLAG:
+        raise SystemExit(run_worker(sys.argv[2]))
+
     api = Api()
     webview.create_window(
         "ML Dataset Profiler",

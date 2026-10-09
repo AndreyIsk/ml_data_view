@@ -25,6 +25,12 @@ def test_available_sections_true_for_overview_and_distributions_on_a_plain_datas
         "distributions": True,
         "embeddings": False,
         "media": False,
+        # No timestamp column, so no time axis and no Health section —
+        # the same precondition its checks declare.
+        "health": False,
+        # One row is not a catalogue: at unit scope the sections beside it
+        # already say everything that row would.
+        "catalog": False,
     }
 
 
@@ -225,3 +231,130 @@ def test_log_scale_histogram_renders_into_the_pdf(tmp_path):
         tmp_path / "log.pdf", dataset_info=info, chart_data=charts, sections=["distributions"]
     )
     assert out.stat().st_size > 1000
+
+
+# --- the catalogue section --------------------------------------------
+
+
+def _catalog_payload(unhealthy: bool = True) -> dict:
+    """A catalogue as api._report_chart_data() hands one over: rows with
+    their health already attached."""
+    rows = [
+        {
+            "label": f"sys=1 / rec_{index}",
+            "group_values": ["sys=1"],
+            "unit_id": f"rec_{index}",
+            "files": [],
+            "chunk_count": 2,
+            "rows": 600,
+            "bytes": 4096,
+            "channel_count": 2,
+            "start": 0.0,
+            "end": 60.0,
+            "duration": 60.0,
+            "hz": 10.0,
+            "gap_count": 0,
+            "gap_share": 0.0,
+            "issues": {},
+            "health": {"status": "ok", "count": 0},
+        }
+        for index in range(3)
+    ]
+    if unhealthy:
+        rows[1]["health"] = {"status": "critical", "count": 2}
+        rows[1]["gap_count"] = 4
+    return {
+        "available": True,
+        "unit_label": "Recording",
+        "group_labels": ["System"],
+        "has_time": True,
+        "columns": [],
+        "rows": rows,
+        "groups": [
+            {
+                "value": "sys=1",
+                "unit_count": 3,
+                "chunk_count": 6,
+                "rows": 1800,
+                "bytes": 12288,
+                "duration": 180.0,
+                "health": {"critical": 1 if unhealthy else 0, "warning": 0, "info": 0, "ok": 2 if unhealthy else 3, "unknown": 0},
+            }
+        ],
+        "totals": {
+            "unit_count": 3,
+            "chunk_count": 6,
+            "rows": 1800,
+            "bytes": 12288,
+            "duration": 180.0,
+        },
+        "health": {"critical": 1 if unhealthy else 0, "warning": 0, "info": 0, "ok": 2 if unhealthy else 3, "unknown": 0},
+    }
+
+
+def test_the_catalogue_section_is_offered_above_unit_scope():
+    assert available_sections({"catalog": _catalog_payload()})["catalog"] is True
+
+
+def test_one_row_is_not_a_catalogue():
+    """At unit scope the health section beside it says the same thing."""
+    payload = _catalog_payload()
+    payload["rows"] = payload["rows"][:1]
+
+    assert available_sections({"catalog": payload})["catalog"] is False
+
+
+def test_the_catalogue_section_summarises_rather_than_listing_every_row(tmp_path):
+    """Top-level numbers, a line per group, and the unhealthy rows named —
+    not two hundred rows nobody would print."""
+    from ml_data_view.report import _catalog_flowables
+    from reportlab.lib.styles import getSampleStyleSheet
+
+    styles = getSampleStyleSheet()
+    story = _catalog_flowables(
+        {"catalog": _catalog_payload()}, styles["Heading2"], styles["Heading3"], styles["BodyText"]
+    )
+
+    text = " ".join(getattr(item, "text", "") for item in story)
+    assert "Recordings catalogue" in text
+    assert "1,800 row(s)" in text
+    assert "1 critical" in text
+    # The unhealthy one is named; the two healthy ones are not.
+    tables = [item for item in story if hasattr(item, "_cellvalues")]
+    unhealthy = tables[-1]._cellvalues
+    assert [row[0] for row in unhealthy[1:]] == ["sys=1 / rec_1"]
+
+
+def test_a_wholly_healthy_catalogue_says_so_rather_than_showing_an_empty_table(tmp_path):
+    from ml_data_view.report import _catalog_flowables
+    from reportlab.lib.styles import getSampleStyleSheet
+
+    styles = getSampleStyleSheet()
+    story = _catalog_flowables(
+        {"catalog": _catalog_payload(unhealthy=False)},
+        styles["Heading2"],
+        styles["Heading3"],
+        styles["BodyText"],
+    )
+
+    text = " ".join(getattr(item, "text", "") for item in story)
+    assert "None." in text
+
+
+def test_generate_report_includes_the_catalogue_section(tmp_path):
+    df = pl.DataFrame({"id": [1, 2, 3, 4]})
+    csv_path = tmp_path / "sample.csv"
+    df.write_csv(csv_path)
+    dataset_info = dataset_info_from_lazy(df.lazy(), csv_path).to_dict()
+    chart_data = {**build_chart_payload(df.lazy()), "catalog": _catalog_payload()}
+    output_path = tmp_path / "report.pdf"
+
+    generate_report(
+        output_path,
+        dataset_info=dataset_info,
+        chart_data=chart_data,
+        sections=["overview", "catalog"],
+        generated_at="2026-08-28T12:00:00+00:00",
+    )
+
+    assert output_path.read_bytes()[:5] == b"%PDF-"

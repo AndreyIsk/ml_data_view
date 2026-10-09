@@ -34,6 +34,16 @@ class ChartBuildJob:
         null_counts: dict[str, int] | None = None,
         files: list[Path] | None = None,
         predicate=None,
+        cache_path: str | Path | None = None,
+        identity: list[dict] | None = None,
+        timestamp_column: str | None = None,
+        timeseries_thresholds: dict | None = None,
+        timeseries_max_channels: int = 12,
+        timeseries_files: list[Path] | None = None,
+        structure_labels: dict | None = None,
+        grouping_column: str | None = None,
+        fleet_thresholds: dict | None = None,
+        fleet_max_channels: int = 12,
     ) -> None:
         self._lf = lf
         self._total_rows = total_rows
@@ -41,6 +51,32 @@ class ChartBuildJob:
         self._null_counts = null_counts
         self._files = files
         self._predicate = predicate
+        # When set (and the build is unfiltered), build_chart_payload
+        # assembles the payload by merging cached per-file statistics and
+        # reads only the files whose entries are missing or stale.
+        self._cache_path = cache_path
+        # Per-chunk derived-column values when the folder has a detected
+        # structure. Their statistics are SYNTHESIZED from row counts
+        # rather than read (see file_profile), so this costs nothing.
+        self._identity = identity
+        # The detected timestamp column, and what the user set the
+        # time-series thresholds to. Absent, the whole time-series pass is
+        # skipped — which is the applicability rule, not an optimisation.
+        self._timestamp_column = timestamp_column
+        self._timeseries_thresholds = timeseries_thresholds
+        self._timeseries_max_channels = timeseries_max_channels
+        # The chunks the time-series pass reads. Equal to `files` for a
+        # folder; for a single opened file there is no file list, and this
+        # is how that one file still gets analysed.
+        self._timeseries_files = timeseries_files
+        # The mapping's own words for its levels, and which column a group
+        # comparison runs over. Both are labels and a name — no data — and
+        # they are what let the catalogue and the fleet comparison be
+        # built in here from statistics already merged.
+        self._structure_labels = structure_labels
+        self._grouping_column = grouping_column
+        self._fleet_thresholds = fleet_thresholds
+        self._fleet_max_channels = fleet_max_channels
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
         self._done = threading.Event()
@@ -85,6 +121,16 @@ class ChartBuildJob:
                 null_counts=self._null_counts,
                 files=self._files,
                 predicate=self._predicate,
+                cache_path=self._cache_path,
+                identity=self._identity,
+                timestamp_column=self._timestamp_column,
+                timeseries_thresholds=self._timeseries_thresholds,
+                timeseries_max_channels=self._timeseries_max_channels,
+                timeseries_files=self._timeseries_files,
+                structure_labels=self._structure_labels,
+                grouping_column=self._grouping_column,
+                fleet_thresholds=self._fleet_thresholds,
+                fleet_max_channels=self._fleet_max_channels,
                 on_progress=lambda fraction, label: self._update(
                     stage="building", fraction=round(fraction, 4), label=label
                 ),

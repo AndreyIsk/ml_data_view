@@ -16,6 +16,19 @@ from typing import Any
 import polars as pl
 
 from ml_data_view.data_loader import row_count
+from ml_data_view.hierarchy import identity_columns
+
+
+def _timeseries_thresholds(raw: dict[str, Any] | None):
+    """Settings' time-series thresholds, as the record timeseries.py takes.
+
+    Imported here rather than at module scope so chart_data stays as cheap
+    to import as it was: timeseries pulls in numpy paths that only a
+    dataset with a time column ever needs.
+    """
+    from ml_data_view.timeseries import Thresholds
+
+    return Thresholds.from_dict(raw)
 from ml_data_view.embedding_data import detect_embedding_columns, embedding_projection_data
 from ml_data_view.image_data import detect_image_columns, image_previews_data
 from ml_data_view.null_patterns import correlated_missingness
@@ -48,8 +61,12 @@ LOG_SCALE_MIN_RANGE = 100.0
 CATEGORICAL_BAR_MAX_DISTINCT = 200
 # Per-file shortlist size for the bounded top-N path. Far above
 # TOP_N_CATEGORIES so a globally-frequent value is not missed for being
-# just outside one file's shortlist.
-CATEGORICAL_PER_FILE_TOP_K = 200
+# just outside one file's shortlist: it would have to rank below this in
+# EVERY file. Raised from 200 when per-file statistics became cacheable
+# (file_profile.py) — the merge is only as good as the shortlist it merges,
+# and the cost is bounded either way, since at most K (value, count) pairs
+# per column per file ever leave the query engine.
+CATEGORICAL_PER_FILE_TOP_K = 1000
 # Detections-per-value buckets. Left-closed upper bounds, so labels are one
 # longer than breaks. Log-ish because these counts pile up at 1.
 VALUE_FREQUENCY_BREAKS = [1.0, 3.0, 10.0, 50.0, 200.0, 1000.0]
@@ -66,6 +83,25 @@ NUMERIC_DTYPE_NAMES = {
     "Float32", "Float64",
 }
 STRING_DTYPE_NAMES = {"String", "Utf8"}
+
+
+def drop_derived(lf: pl.LazyFrame, names: list[str] | None) -> pl.LazyFrame:
+    """The frame without its derived columns (see hierarchy.py).
+
+    Needed by the handful of steps that read the FRAME's schema but then
+    scan the FILES for data — image-column detection above all. A derived
+    column is a literal attached per chunk and is in no file, so asking a
+    file for it fails; and it could never be an image column anyway.
+
+    `names` is passed in rather than being a constant here, because the
+    names depend on the structure mapping: a hive level called `sys_key`
+    contributes a column called `sys_key`. No module may hold a fixed list
+    of them.
+    """
+    if not names:
+        return lf
+    present = [name for name in lf.collect_schema() if name in set(names)]
+    return lf.drop(present) if present else lf
 
 
 def _scan_filtered(file: Path, predicate: pl.Expr | None) -> pl.LazyFrame:
@@ -446,6 +482,18 @@ def numeric_histogram_data(
     return {"column": column, "bin_edges": bin_edges, "counts": counts, "x_scale": "log"}
 
 
+def _ranked(counts: dict[str, int], top_n: int) -> list[tuple[str, int]]:
+    """The top `top_n` categories, ties broken by value.
+
+    Deterministic on purpose: counts tie constantly on real categorical
+    data, and without a second key the same ten bars come back in a
+    different order between runs — and, worse, the per-file merge and the
+    single-frame path rank a Python dict and a polars table respectively,
+    so they would disagree on which ten.
+    """
+    return sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:top_n]
+
+
 def _categorical_bar_per_file(
     files: list[Path], column: str, top_n: int, predicate: pl.Expr | None = None
 ) -> dict[str, Any]:
@@ -465,6 +513,7 @@ def _categorical_bar_per_file(
     """
     merged: dict[str, int] = {}
     total = 0
+    truncated = False
     for file in files:
         scan = _scan_filtered(file, predicate).select(column).drop_nulls()
         total += int(scan.select(pl.len()).collect(engine="streaming")[0, 0])
@@ -475,18 +524,26 @@ def _categorical_bar_per_file(
             .head(CATEGORICAL_PER_FILE_TOP_K)
             .collect(engine="streaming")
         )
-        for value, count in zip(top[column].to_list(), top["len"].to_list()):
+        values = top[column].to_list()
+        # A file that filled its shortlist had more distinct values than
+        # fitted, so its contribution to the merge is an underestimate for
+        # whatever fell off the end. Reported rather than assumed away: the
+        # UI marks the chart, because a count the user might quote has to
+        # say when it could be low.
+        if len(values) >= CATEGORICAL_PER_FILE_TOP_K:
+            truncated = True
+        for value, count in zip(values, top["len"].to_list()):
             key = str(value)
             merged[key] = merged.get(key, 0) + int(count)
 
-    ordered = sorted(merged.items(), key=lambda item: item[1], reverse=True)[:top_n]
+    ordered = _ranked(merged, top_n)
     categories = [value for value, _ in ordered]
     counts = [count for _, count in ordered]
     other = total - sum(counts)
     if other > 0:
         categories.append("Other")
         counts.append(other)
-    return {"column": column, "categories": categories, "counts": counts}
+    return {"column": column, "categories": categories, "counts": counts, "truncated": truncated}
 
 
 def categorical_bar_data(
@@ -502,15 +559,21 @@ def categorical_bar_data(
     result = lf.select(non_null.value_counts(sort=True).alias("__vc")).collect(engine="streaming")
     value_counts = result.unnest("__vc")
 
-    categories = [str(v) for v in value_counts[column].to_list()]
-    counts = value_counts["count"].to_list()
+    tallies = {
+        str(value): int(count)
+        for value, count in zip(value_counts[column].to_list(), value_counts["count"].to_list())
+    }
+    ordered = _ranked(tallies, top_n)
+    categories = [value for value, _ in ordered]
+    counts = [count for _, count in ordered]
+    other_count = sum(tallies.values()) - sum(counts)
+    if other_count > 0:
+        categories = categories + ["Other"]
+        counts = counts + [other_count]
 
-    if len(categories) > top_n:
-        other_count = sum(counts[top_n:])
-        categories = categories[:top_n] + ["Other"]
-        counts = counts[:top_n] + [other_count]
-
-    return {"column": column, "categories": categories, "counts": counts}
+    # Never truncated on this path: a single frame's value_counts is the
+    # complete table, so the top N really are the top N.
+    return {"column": column, "categories": categories, "counts": counts, "truncated": False}
 
 
 def value_frequency_histogram_data(
@@ -584,7 +647,29 @@ def value_frequency_histogram_data(
 def text_length_histogram_data(
     lf: pl.LazyFrame, column: str, bins: int = TEXT_LENGTH_HISTOGRAM_BINS
 ) -> dict[str, Any]:
+    """Distribution of a text column's character lengths.
+
+    A column whose values are all the SAME length is handled before
+    reaching polars' binning: asked for 30 bins over a zero-width range,
+    polars widens it to +/- 0.5 around the value and returns edges whose
+    first element (the minimum) sits above the second (the first
+    breakpoint) — a malformed axis for an answer that is really "one bin".
+    Matching numeric_histogram_data's treatment of the same case also lets
+    the merged per-file path (file_profile.py) agree with this one exactly.
+    """
     lengths = pl.col(column).drop_nulls().str.len_chars().cast(pl.Float64)
+    extent = lf.select(
+        lengths.count().alias("__n"), lengths.min().alias("__min"), lengths.max().alias("__max")
+    ).collect(engine="streaming")
+    if int(extent[0, "__n"]) == 0:
+        return {"column": column, "bin_edges": [], "counts": []}
+    minimum, maximum = float(extent[0, "__min"]), float(extent[0, "__max"])
+    if maximum <= minimum:
+        return {
+            "column": column,
+            "bin_edges": [minimum, maximum],
+            "counts": [int(extent[0, "__n"])],
+        }
     counts, bin_edges = _histogram_from_clean_expr(lf, lengths, bins)
     return {"column": column, "bin_edges": bin_edges, "counts": counts}
 
@@ -666,6 +751,16 @@ def build_chart_payload(
     files: list[Path] | None = None,
     on_progress: Callable[[float, str], None] | None = None,
     predicate: pl.Expr | None = None,
+    cache_path: str | Path | None = None,
+    identity: list[dict[str, Any]] | None = None,
+    timestamp_column: str | None = None,
+    timeseries_thresholds: dict[str, Any] | None = None,
+    timeseries_max_channels: int = 12,
+    timeseries_files: list[Path] | None = None,
+    structure_labels: dict[str, Any] | None = None,
+    grouping_column: str | None = None,
+    fleet_thresholds: dict[str, Any] | None = None,
+    fleet_max_channels: int = 12,
 ) -> dict[str, Any]:
     """Compute every Phase 1+2+3 chart's data for the given LazyFrame.
 
@@ -679,7 +774,40 @@ def build_chart_payload(
     relative file paths for path-sourced image columns; without it, such
     columns are still detected but their thumbnails come back empty.
     """
+    # The cached path assembles the same payload by MERGING per-file
+    # statistics, reading only the files whose cache entry is missing or
+    # stale (file_profile.py). Everything below stays the reference
+    # implementation the merge is tested against — and is still the only
+    # path for a filtered build, where a cached per-file statistic is
+    # simply not about the same rows.
+    if cache_path is not None and files and predicate is None:
+        # Imported here, not at module scope: file_profile imports this
+        # module for its constants and helpers.
+        from ml_data_view.file_profile import build_chart_payload_from_cache
+        from ml_data_view.profile_cache import ProfileCache
+
+        with ProfileCache(cache_path) as cache:
+            return build_chart_payload_from_cache(
+                lf,
+                [Path(f) for f in files],
+                cache,
+                total_rows=total_rows,
+                dataset_dir=dataset_dir,
+                null_counts=null_counts,
+                on_progress=on_progress,
+                identity=identity,
+                timestamp_column=timestamp_column,
+                thresholds=_timeseries_thresholds(timeseries_thresholds),
+                max_channels=timeseries_max_channels,
+                labels=structure_labels,
+                grouping_column=grouping_column,
+                fleet_thresholds=_fleet_thresholds(fleet_thresholds),
+                fleet_max_channels=fleet_max_channels,
+            )
+
     schema = lf.collect_schema()
+    derived = identity_columns(identity)
+    derived_set = set(derived)
     # The filter is applied to the frame here AND passed to every per-file
     # helper below, because the two take different routes to the data: the
     # per-file helpers re-scan each file themselves and never see this frame.
@@ -706,6 +834,14 @@ def build_chart_payload(
 
     for index, column in enumerate(schema):
         report(f"Charting columns — {index + 1} of {len(schema)}")
+        if files and column in derived_set:
+            # A derived column (hierarchy.py) exists on the frame, not in
+            # any file, so the per-file path cannot read it. The cached
+            # path synthesizes its statistics from row counts instead; this
+            # one — used for filtered builds — leaves it uncharted rather
+            # than guessing.
+            completed += 1
+            continue
         chart_type, cardinality = classify_column_with_cardinality(
             lf, column, files=files, predicate=predicate
         )
@@ -752,7 +888,7 @@ def build_chart_payload(
     # column); thumbnail generation is capped at 50 rows so it stays cheap too.
     completed += 1
     report(_TRAILING_STEPS[1])
-    image_columns = detect_image_columns(lf, files=files)
+    image_columns = detect_image_columns(drop_derived(lf, derived), files=files)
     image_previews = [
         image_previews_data(
             lf, image["column"], image["source"], total_rows=total_rows, dataset_dir=dataset_dir
@@ -780,6 +916,32 @@ def build_chart_payload(
     completed += 1
     report(_TRAILING_STEPS[3])
     heatmap = null_heatmap_data(lf, total_rows=total_rows)
+
+    # The same time-series pass the cached path runs, for the inputs that
+    # do not take it: a single file, and a filtered build. Without a cache
+    # here, so it recomputes — which is affordable because it only ever
+    # covers the files this call was given.
+    report("Checking time-series health…")
+    timeseries = _direct_timeseries(
+        lf,
+        timeseries_files or files,
+        timestamp_column if predicate is None else None,
+        timeseries_thresholds,
+        timeseries_max_channels,
+        cache_path if predicate is None else None,
+    )
+    # The catalogue, on the direct path. A FILTERED build gets None for
+    # the same reason its time-series pass does: every row count here
+    # would describe the rows that survived the filter while every figure
+    # beside it describes the file, and a catalogue whose numbers mean two
+    # different things is worse than no catalogue.
+    catalog = (
+        None
+        if predicate is not None
+        else _direct_catalog(
+            lf, timeseries_files or files, timeseries, structure_labels, total_rows
+        )
+    )
     completed += 1
     report("Charts ready.")
 
@@ -794,4 +956,115 @@ def build_chart_payload(
         "embedding_projections": embedding_projections,
         "image_columns": image_columns,
         "image_previews": image_previews,
+        "timeseries": timeseries,
+        "catalog": catalog,
+        # No group comparison on the direct path, and this is not a gap.
+        # The direct path is reached by a single file (nothing to group)
+        # and by a filtered build (where a cached per-file statistic is
+        # not about the rows on screen); a grouped folder always has a
+        # cache and takes the merged path.
+        "fleet": None,
     }
+
+
+def _fleet_thresholds(raw: dict[str, Any] | None):
+    from ml_data_view.fleet import FleetThresholds
+
+    return FleetThresholds.from_dict(raw)
+
+
+def _direct_catalog(
+    lf: pl.LazyFrame,
+    files: list[Path] | None,
+    timeseries: dict[str, Any] | None,
+    labels: dict[str, Any] | None,
+    total_rows: int | None,
+) -> dict[str, Any] | None:
+    """One catalogue row per file, with no cache to merge from.
+
+    Row counts come from parquet FOOTERS — metadata, the same source
+    folder discovery uses — and are unknown for a format with no
+    metadata-only path, exactly as folder_loader reports them. The one
+    exception is a single opened file, whose row count the caller already
+    counted and would be silly to report as unknown.
+    """
+    from ml_data_view.file_profile import build_catalog_payload
+    from ml_data_view.hierarchy import read_footer
+
+    paths = [Path(file) for file in (files or [])]
+    if not paths:
+        return None
+    counts: dict[str, int] = {}
+    if len(paths) == 1 and total_rows is not None:
+        counts[str(paths[0])] = int(total_rows)
+    else:
+        for path in paths:
+            footer = read_footer(path)
+            if footer is not None:
+                counts[str(path)] = int(footer.row_count)
+    schema = {name: str(dtype) for name, dtype in lf.collect_schema().items()}
+    return build_catalog_payload(
+        paths,
+        identity=None,
+        row_counts=counts,
+        schemas={str(path): schema for path in paths},
+        timeseries=timeseries,
+        labels=labels,
+    )
+
+
+def _direct_timeseries(
+    lf: pl.LazyFrame,
+    files: list[Path] | None,
+    timestamp_column: str | None,
+    thresholds: dict[str, Any] | None,
+    max_channels: int,
+    cache_path: str | Path | None = None,
+) -> dict[str, Any] | None:
+    """Time-series health on the direct path.
+
+    Reached by a single opened file and by a filtered build. A filtered
+    build gets None: every dt here would be the gap between rows that
+    SURVIVED the filter, which is a different quantity wearing the same
+    name, and reporting it as a sample rate would be wrong in a way nobody
+    could see.
+
+    The per-chunk artifacts are CACHED even here, where the rest of the
+    payload is not. A chunk is one file however it was opened, and the
+    time-series pass is keyed on the file exactly as the merged path's is
+    — so a single opened file re-opens for free, and the timeline viewer
+    has the per-chunk buckets it draws its overview from. The filtered
+    build passes no cache, because it computes no artifact to store.
+    """
+    if not timestamp_column or not files:
+        return None
+    from ml_data_view.file_profile import build_timeseries_payload
+    from ml_data_view.profile_cache import ProfileCache
+
+    schema = lf.collect_schema()
+    numeric = [
+        name
+        for name, dtype in schema.items()
+        if str(dtype) in NUMERIC_DTYPE_NAMES and name != timestamp_column
+    ]
+    paths = [Path(file) for file in files]
+    if cache_path is None:
+        return build_timeseries_payload(
+            paths,
+            timestamp_column,
+            numeric,
+            _timeseries_thresholds(thresholds),
+            cache=None,
+            identity=None,
+            max_channels=max_channels,
+        )
+    with ProfileCache(cache_path) as cache:
+        return build_timeseries_payload(
+            paths,
+            timestamp_column,
+            numeric,
+            _timeseries_thresholds(thresholds),
+            cache=cache,
+            identity=None,
+            max_channels=max_channels,
+        )

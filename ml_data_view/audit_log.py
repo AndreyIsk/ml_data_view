@@ -89,6 +89,56 @@ def record_report_generated(
     )
 
 
+def record_watch_started(
+    folder_name: str,
+    settings: AppSettings,
+    *,
+    base_dir: Path | None = None,
+    username: str | None = None,
+    timestamp: str | None = None,
+) -> None:
+    """Audit-log that a folder is now being watched.
+
+    Logged as its own action rather than folded into folder_open: watching
+    means the app will read files nobody explicitly opened, at times nobody
+    chose, and an audit log exists precisely to record that kind of thing.
+    """
+    _record_if_enabled(
+        "watch_started", folder_name, settings, base_dir=base_dir, username=username, timestamp=timestamp
+    )
+
+
+def record_watch_stopped(
+    folder_name: str,
+    settings: AppSettings,
+    *,
+    base_dir: Path | None = None,
+    username: str | None = None,
+    timestamp: str | None = None,
+) -> None:
+    """Audit-log that watching stopped — the closing bracket on
+    record_watch_started, so a reader can tell a live watch from a finished
+    one without inferring it from the absence of later entries."""
+    _record_if_enabled(
+        "watch_stopped", folder_name, settings, base_dir=base_dir, username=username, timestamp=timestamp
+    )
+
+
+def record_reprofile(
+    folder_name: str,
+    settings: AppSettings,
+    *,
+    base_dir: Path | None = None,
+    username: str | None = None,
+    timestamp: str | None = None,
+) -> None:
+    """Audit-log a watch-triggered re-profile. This is the entry that says
+    the app read data on its own initiative."""
+    _record_if_enabled(
+        "reprofile", folder_name, settings, base_dir=base_dir, username=username, timestamp=timestamp
+    )
+
+
 def record_folder_open(
     folder_name: str,
     settings: AppSettings,

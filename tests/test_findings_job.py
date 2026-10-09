@@ -175,4 +175,13 @@ def test_findings_are_plain_dicts_for_the_js_bridge(tmp_path):
         for finding in check["findings"]:
             assert isinstance(finding, dict)
             assert not isinstance(finding, Finding)
-            assert set(finding) == {"check_id", "severity", "title", "detail", "columns"}
+            assert set(finding) == {
+                "check_id",
+                "severity",
+                "title",
+                "detail",
+                "columns",
+                # The unit a finding is about, when it is about one. Empty
+                # for a deep check, which reads the whole dataset.
+                "unit",
+            }

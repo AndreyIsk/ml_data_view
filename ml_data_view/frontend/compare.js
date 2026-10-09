@@ -139,35 +139,19 @@ function renderCompareFinal(result) {
   }
 }
 
-async function startComparison(kind) {
-  const { status, progress, resultsBody } = comparePanels();
-  const path = await window.pywebview.api.compare_picker_dialog(kind);
-  if (!path) return;
-
-  clearError();
-  resultsBody.innerHTML = "";
-  compareSeenColumns = 0;
-  document.getElementById("compare-results-panel").classList.add("hidden");
-
-  const compareAll = document.getElementById("compare-all-files").checked;
-  // Called with one argument when sampling, so the backend's own default
-  // applies. Passing `undefined` would serialize to null across the bridge,
-  // and null is what the backend reads as "compare every file" — the exact
-  // opposite of what the unchecked box means.
-  const started = compareAll
-    ? await window.pywebview.api.start_comparison(path, null)
-    : await window.pywebview.api.start_comparison(path);
-  if (started.error) {
-    showError(started.error);
-    return;
-  }
-
+// Everything from "the job has started" onwards, shared by both ways of
+// starting one. The two differ only in where the file lists came from —
+// a picker, or two scopes of the loaded structure — and a second copy of
+// the polling and rendering is how the results table would end up
+// behaving differently depending on which button opened it.
+function driveComparison(started, headline) {
+  const { status, progress } = comparePanels();
   renderSchemaDiff(started.schema);
   const sampledNote =
     started.sampled && (started.files_a > 1 || started.files_b > 1)
       ? ` · sampled ${started.files_a} and ${started.files_b} files, spread across each dataset`
       : "";
-  status.textContent = `Comparing against ${path}${sampledNote}`;
+  status.textContent = `${headline}${sampledNote}`;
   progress.classList.remove("hidden");
   document.getElementById("compare-stop-btn").disabled = false;
   document.getElementById("compare-stop-btn").textContent = "Stop";
@@ -198,6 +182,51 @@ async function startComparison(kind) {
     }
   };
   poll();
+}
+
+function resetCompareResults() {
+  const { resultsBody } = comparePanels();
+  resultsBody.innerHTML = "";
+  compareSeenColumns = 0;
+  document.getElementById("compare-results-panel").classList.add("hidden");
+}
+
+async function startComparison(kind) {
+  const path = await window.pywebview.api.compare_picker_dialog(kind);
+  if (!path) return;
+
+  clearError();
+  resetCompareResults();
+
+  const compareAll = document.getElementById("compare-all-files").checked;
+  // Called with one argument when sampling, so the backend's own default
+  // applies. Passing `undefined` would serialize to null across the bridge,
+  // and null is what the backend reads as "compare every file" — the exact
+  // opposite of what the unchecked box means.
+  const started = compareAll
+    ? await window.pywebview.api.start_comparison(path, null)
+    : await window.pywebview.api.start_comparison(path);
+  if (started.error) {
+    showError(started.error);
+    return;
+  }
+  driveComparison(started, `Comparing against ${path}`);
+}
+
+// Two scopes of the loaded structure — two units, or two groups — against
+// each other. Launched from the catalogue, and deliberately the SAME
+// comparison the picker starts: a scope is just another way of naming a
+// list of files, so nothing about the comparison itself changes.
+async function startScopeComparison(scopeA, scopeB) {
+  clearError();
+  resetCompareResults();
+  const started = await window.pywebview.api.start_scope_comparison(scopeA, scopeB);
+  if (started.error) {
+    showError(started.error);
+    return;
+  }
+  activateSection("compare");
+  driveComparison(started, `Comparing ${started.label_a} with ${started.label_b}`);
 }
 
 document.getElementById("compare-folder-btn").addEventListener("click", () => startComparison("folder"));

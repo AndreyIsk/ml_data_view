@@ -194,6 +194,16 @@ function renderSearchResults(result) {
   document.getElementById("search-results-panel").classList.remove("hidden");
 }
 
+// Replace the form's conditions with these and run them. Shared by saved
+// searches and by the timeline's "search this window", so a query that
+// arrives from elsewhere is a query the user can then SEE and edit rather
+// than an invisible filter.
+function applySearchConditions(conditions) {
+  document.getElementById("search-conditions").innerHTML = "";
+  (conditions || []).forEach((condition) => addConditionRow(condition));
+  return handleRunSearch();
+}
+
 async function handleRunSearch() {
   clearError();
   clearConditionErrors();
@@ -276,11 +286,7 @@ async function renderSavedSearches() {
     run.type = "button";
     run.className = "saved-search-run";
     run.textContent = saved.name;
-    run.addEventListener("click", () => {
-      document.getElementById("search-conditions").innerHTML = "";
-      (saved.conditions || []).forEach((condition) => addConditionRow(condition));
-      handleRunSearch();
-    });
+    run.addEventListener("click", () => applySearchConditions(saved.conditions || []));
 
     const remove = document.createElement("button");
     remove.type = "button";

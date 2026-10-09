@@ -142,11 +142,75 @@ body {
   border-bottom: 1px solid var(--border);
 }
 
+/* Pushes everything after it to the strip's far edge. An explicit spacer
+   rather than margin-left:auto on each of the two things over there —
+   with two auto margins the free space splits between them, so the jobs
+   indicator drifted away from the banner as jobs came and went. */
+#top-strip-spacer {
+  flex: 1 1 auto;
+}
+
 /* Classification banner's top-strip slot. Empty (and takes no visible
-   space) when the banner is disabled — pushed to the strip's far edge so
-   when it IS filled it reads as a status, not an action. */
+   space) when the banner is disabled — at the strip's far edge so when it
+   IS filled it reads as a status, not an action. */
 #classification-banner-slot {
-  margin-left: auto;
+  flex: 0 0 auto;
+}
+
+/* Running background jobs (ml_data_view/jobs.py). In the persistent top
+   strip, not in the tab that started the job: the work outlives the tab
+   the user is looking at, and a job with no visible home is a job nobody
+   can stop. Column layout so several concurrent jobs stack rather than
+   squeezing each other out of the strip. */
+#jobs-indicator {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  align-items: flex-end;
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+.job-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  background: var(--info-bg);
+  border: 1px solid var(--info-border);
+  border-radius: 6px;
+  padding: 3px 8px;
+  max-width: 460px;
+}
+
+.job-title {
+  font-weight: 600;
+  color: var(--info-text);
+  white-space: nowrap;
+}
+
+/* The step the job is on, e.g. "Counting missing values — file 12 of 250".
+   Allowed to truncate; the title beside it and the ETA after it are the
+   two things that must always stay readable. */
+.job-detail {
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.job-row progress {
+  width: 90px;
+  height: 8px;
+  flex: 0 0 auto;
+}
+
+.job-eta {
+  font-variant-numeric: tabular-nums; /* stop the estimate jittering */
+  color: var(--text-muted);
+  white-space: nowrap;
 }
 
 .classification-banner-chip {
@@ -576,6 +640,296 @@ th {
 #reports-result {
   margin: 12px 0 0;
   word-break: break-all;
+}
+
+/* Number-plus-unit ("8 GB"): the unit belongs beside the box, not above
+   it as a second label. */
+.settings-inline-input {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 400;
+  color: var(--text-secondary);
+}
+
+.settings-inline-input input[type="number"] {
+  width: 90px;
+  font: inherit;
+  color: var(--text-primary);
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 7px 10px;
+}
+
+/* A setting that is not doing what it says — the OS ceiling is off. Styled
+   as a warning because it is one; the hint above it is not. */
+.settings-warning {
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  font-size: 0.82rem;
+  font-weight: 400;
+  color: var(--warning-text);
+  background: var(--warning-bg);
+  border: 1px solid var(--warning-border);
+  border-radius: 6px;
+  max-width: 420px;
+}
+
+/* The scope breadcrumb. Reads as a path rather than as controls: the
+   crumbs are the trail back up, and the select at the end is the step
+   down. Muted, because it describes what you are looking at rather than
+   asking for anything. */
+/* Styled like the load stat line, not like a banner: it reports a
+   decision the app made, and the banners below it carry things the user
+   must act on. */
+#structure-note {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 0;
+  padding: 8px 28px 0;
+  font-size: 0.82rem;
+  color: var(--text-muted);
+}
+
+#scope-breadcrumb {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 1 auto;
+  min-width: 0;
+  font-size: 0.82rem;
+}
+
+.scope-crumb {
+  background: transparent;
+  border: none;
+  padding: 2px 4px;
+  font: inherit;
+  color: var(--accent);
+  cursor: pointer;
+  border-radius: 4px;
+  white-space: nowrap;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.scope-crumb:hover {
+  background: var(--surface-2);
+}
+
+/* The last crumb is where you ARE, so it is not a link back to itself. */
+.scope-crumb.scope-current {
+  color: var(--text-primary);
+  font-weight: 600;
+  cursor: default;
+}
+
+.scope-crumb.scope-current:hover {
+  background: transparent;
+}
+
+.scope-separator {
+  color: var(--text-muted);
+}
+
+#scope-breadcrumb select {
+  font: inherit;
+  font-size: 0.8rem;
+  color: var(--text-primary);
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 2px 6px;
+  max-width: 220px;
+}
+
+/* One row per directory level in the structure dialog. */
+.structure-level {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.structure-level:last-of-type {
+  border-bottom: none;
+}
+
+.health-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 22px;
+  margin-top: 12px;
+  font-size: 0.85rem;
+}
+
+.health-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.health-stat-label {
+  color: var(--text-muted);
+  font-size: 0.78rem;
+}
+
+.health-stat-value {
+  color: var(--text-primary);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.health-stat-bad .health-stat-value {
+  color: var(--error-text);
+}
+
+.findings-grouping {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+}
+
+.findings-grouping select {
+  font: inherit;
+  font-size: 0.85rem;
+  color: var(--text-primary);
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 8px;
+}
+
+.structure-level-label {
+  font: inherit;
+  font-size: 0.85rem;
+  color: var(--text-primary);
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 8px;
+  width: 140px;
+}
+
+.structure-level-label:disabled {
+  opacity: 0.5;
+}
+
+.structure-level-examples {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.structure-level select,
+.structure-timestamp select {
+  font: inherit;
+  font-size: 0.85rem;
+  color: var(--text-primary);
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 8px;
+}
+
+.structure-timestamp {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 14px 0 0;
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+}
+
+/* The Watching indicator. Quiet by design — it reports a state, not a
+   problem — but with a live dot, because "is it still watching" is the one
+   question it exists to answer at a glance. */
+#watch-indicator {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  background: var(--success-bg);
+  border: 1px solid var(--success-border);
+  border-radius: 6px;
+  padding: 3px 8px;
+}
+
+#watch-indicator.watch-paused {
+  background: var(--warning-bg);
+  border-color: var(--warning-border);
+}
+
+.watch-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--success-text);
+  flex: 0 0 auto;
+}
+
+.watch-paused .watch-dot {
+  background: var(--warning-text);
+}
+
+#watch-label {
+  white-space: nowrap;
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Corner toast for a completed re-profile. Fixed to the bottom-right so it
+   never moves anything on the page, and pointer-events:none so it cannot
+   swallow a click meant for what is underneath it. */
+#watch-toast {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  max-width: 360px;
+  z-index: 40;
+  padding: 10px 14px;
+  font-size: 0.85rem;
+  color: var(--info-text);
+  background: var(--info-bg);
+  border: 1px solid var(--info-border);
+  border-radius: var(--radius);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.14);
+  pointer-events: none;
+  opacity: 1;
+  transition: opacity 0.4s ease;
+}
+
+#watch-toast.watch-toast-fading {
+  opacity: 0;
+}
+
+.settings-actions {
+  display: flex;
+  gap: 10px;
+  margin: 4px 0 0;
+}
+
+/* Marks a chart whose numbers could be affected by an approximation — the
+   merged top-K case. Deliberately quiet: the chart is still the best
+   available answer, and an alarm-coloured badge would say otherwise. */
+.chart-flag {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  margin: 0 0 4px;
+  line-height: 1.3;
 }
 
 .settings-static-value {
@@ -1191,3 +1545,179 @@ th {
   color: var(--text-muted);
   font-size: 0.82rem;
 }
+
+
+/* --- Catalogue and group comparison ---------------------------------- */
+/* Both tables are dense by design: the point of a catalogue is comparing
+   rows against each other, and a comfortable row height turns nineteen
+   recordings into a scroll. */
+
+.catalog-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+}
+
+.catalog-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.82rem;
+  color: var(--text-secondary);
+}
+
+.catalog-filter {
+  padding: 5px 9px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 0.85rem;
+  min-width: 200px;
+}
+
+/* Wide tables scroll inside their own panel rather than pushing the page
+   sideways — a catalogue grows a column per group level, and there is no
+   upper bound on how many of those a tree has. */
+.catalog-table-wrapper {
+  max-height: 560px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.catalog-table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 0.85rem;
+}
+
+.catalog-table th,
+.catalog-table td {
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  white-space: nowrap;
+}
+
+.catalog-table thead th {
+  position: sticky;
+  top: 0;
+  background: var(--surface-2);
+  color: var(--text-secondary);
+  font-weight: 600;
+  z-index: 1;
+}
+
+.catalog-table td.numeric { text-align: right; font-variant-numeric: tabular-nums; }
+.catalog-table td.catalog-select,
+.catalog-table th:first-child { width: 28px; }
+
+.catalog-sortable { cursor: pointer; user-select: none; }
+.catalog-sortable:hover { color: var(--text); }
+
+.catalog-row { cursor: pointer; }
+.catalog-row:hover { background: var(--surface-2); }
+
+.catalog-health-breakdown { display: flex; gap: 4px; flex-wrap: wrap; }
+
+/* Health reuses the severity palette rather than introducing a second
+   one: "warning" on a catalogue row and "warning" in the Findings tab are
+   the same claim about the same finding. */
+.health-critical { background: var(--error-bg); color: var(--error-text); border-color: var(--error-border); }
+.health-warning { background: var(--warning-bg); color: var(--warning-text); border-color: var(--warning-border); }
+.health-info { background: var(--surface-2); color: var(--text-muted); border-color: var(--border); }
+.health-ok { background: var(--success-bg); color: var(--success-text); border-color: var(--success-border); }
+/* "Unknown" is deliberately not green. Nothing has looked yet, and a
+   green tick before anything looked is the one answer that would be a lie. */
+.health-unknown { background: var(--surface-2); color: var(--text-muted); border-color: var(--border); }
+
+/* Small multiples: one compact distribution per group, wrapping into as
+   many rows as the window allows. */
+.fleet-multiples {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 12px;
+  margin-top: 10px;
+}
+
+.fleet-multiple {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px;
+  background: var(--surface);
+}
+
+.fleet-multiple-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 0.82rem;
+  color: var(--text-secondary);
+  margin-bottom: 4px;
+}
+
+.fleet-multiple-plot { width: 100%; height: 150px; }
+
+
+/* --- Channel timeline ------------------------------------------------ */
+/* Height is set per draw (one strip per channel), so unlike the other
+   .chart-plot rules this one must not pin it. */
+
+.timeline-plot {
+  height: auto;
+  min-height: 160px;
+  width: 100%;
+}
+
+#timeline-channels {
+  min-width: 160px;
+  font-family: var(--mono-font, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 0.82rem;
+}
+
+#timeline-selection {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+#timeline-selection h3,
+#timeline-marks-panel h3 {
+  font-size: 0.95rem;
+  margin: 0 0 4px;
+}
+
+#timeline-marks-panel {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.timeline-marks {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+/* A row per mark, and the reason the marks are a LIST as well as bands on
+   the chart: a Plotly shape cannot be clicked, and "click to jump" has to
+   land on something. */
+.timeline-mark {
+  display: grid;
+  grid-template-columns: auto minmax(140px, auto) 1fr auto;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.85rem;
+}
+
+.timeline-mark:last-child { border-bottom: none; }
+.timeline-mark-label { font-weight: 600; }
+.timeline-mark-detail { color: var(--text-secondary); }

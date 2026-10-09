@@ -23,6 +23,30 @@
         <button type="button" id="stop-load-btn" class="btn-stop">Stop</button>
       </span>
     </span>
+    <!-- The scope trail, in the MAPPING's words — the code has no
+         vocabulary of its own here. In the persistent top strip because
+         EVERY section below operates on the selected scope, so the
+         breadcrumb is what says which data the whole window is
+         describing and cannot live inside one of those sections. Hidden
+         entirely for an input with no detected structure, which is most
+         of them. -->
+    <nav id="scope-breadcrumb" class="hidden" aria-label="Scope"></nav>
+    <span id="top-strip-spacer"></span>
+    <!-- Shown only while a folder is actually being watched. Carries the
+         folder, anything still being written, and pause/resume — a watcher
+         that reads files on its own initiative must be visible and must be
+         stoppable from wherever the user is. -->
+    <span id="watch-indicator" class="hidden" aria-live="polite">
+      <span class="watch-dot" aria-hidden="true"></span>
+      <span id="watch-label"></span>
+      <button type="button" id="watch-toggle-btn" class="btn-stop">Pause</button>
+    </span>
+    <!-- Running background jobs (ml_data_view/jobs.py), one row each with
+         progress, ETA and its own Cancel. Lives in the persistent top
+         strip rather than in the tab that started the job: the work
+         outlives the tab the user is looking at, and a job with no visible
+         home is a job nobody can stop. Filled by renderJobs(). -->
+    <div id="jobs-indicator" class="hidden" aria-live="polite"></div>
     <!-- Filled by renderClassificationBanner() (app.js) when Settings'
          classification banner is enabled; empty and inert otherwise. -->
     <div id="classification-banner-slot"></div>
@@ -33,6 +57,17 @@
        styled as a banner — the banners below carry warnings, this carries
        a measurement. Hidden until there is something true to say. -->
   <p id="load-stats" class="hidden" role="status"></p>
+
+  <!-- Said once, after a folder with sub-directories loaded flat because
+       nothing in it was recognised. A note, not a warning: nothing is
+       wrong, but silently flattening someone's tree without a word is how
+       they conclude the app cannot read their data. -->
+  <p id="structure-note" class="hidden" role="status">
+    <span id="structure-note-text"></span>
+    <button type="button" id="structure-note-btn" class="btn-secondary">
+      Set folder structure…
+    </button>
+  </p>
 
   <section id="error-banner" class="hidden"></section>
 
@@ -55,6 +90,13 @@
       <button type="button" class="nav-item" data-section="distributions">Distributions</button>
       <button type="button" class="nav-item" data-section="embeddings">Embeddings</button>
       <button type="button" class="nav-item" data-section="media">Media</button>
+      <button type="button" class="nav-item" data-section="health">Health</button>
+      <!-- Both labels are rewritten from the structure mapping the moment
+           one is confirmed ("Recordings", "Systems"). The defaults are
+           generic because nothing in this app knows what the levels are
+           called until the user says. -->
+      <button type="button" class="nav-item" data-section="catalog" id="nav-catalog">Catalogue</button>
+      <button type="button" class="nav-item" data-section="groups" id="nav-groups">Groups</button>
       <button type="button" class="nav-item" data-section="findings">Findings</button>
       <button type="button" class="nav-item" data-section="search">Search</button>
       <button type="button" class="nav-item" data-section="compare">Compare</button>
@@ -98,6 +140,12 @@
       <section id="section-distributions" class="app-section hidden">
         <h2 class="section-heading">Distributions</h2>
         <div id="distributions-charts" class="panel chart-content hidden">
+          <!-- Only when a re-opened folder had to redo a column's
+               histogram because a new file widened its range past the
+               cached bin edges. Shown because that is the one case where
+               opening a cached folder does real work, and a silent pause
+               is worse than a named one. -->
+          <p id="range-expanded-note" class="chart-note hidden"></p>
           <!-- Hidden unless null_patterns.py confirms columns whose nulls
                land on the same rows; filled by renderCorrelatedMissingness(). -->
           <div class="chart-subsection hidden" id="correlated-missingness-section">
@@ -198,6 +246,222 @@
         </div>
       </section>
 
+      <!-- Time-series health. Present only when a timestamp column was
+           detected — the same precondition the checks declare, so the tab
+           and the Findings tab agree about whether this dataset has a
+           time axis at all. -->
+      <section id="section-health" class="app-section hidden">
+        <h2 class="section-heading">Health</h2>
+        <p id="health-empty" class="chart-note">
+          No timestamp column was detected in this dataset, so there is no time
+          axis to check. Pick one in the structure dialog if this data has one.
+        </p>
+        <div id="health-content" class="hidden">
+          <div class="panel">
+            <label class="settings-field">
+              Recording
+              <select id="health-unit-select"></select>
+            </label>
+            <div id="health-summary" class="health-summary"></div>
+          </div>
+
+          <div class="panel">
+            <h2>Coverage</h2>
+            <p class="chart-note">
+              Where this recording has data, where it has gaps, and where a gap falls
+              exactly on a chunk boundary — the shape of a file that never arrived.
+            </p>
+            <div id="health-coverage" class="chart-plot"></div>
+          </div>
+
+          <div class="panel">
+            <h2>Sample interval over time</h2>
+            <p class="chart-note">
+              Median and maximum interval per time bucket. Bucketed aggregates, never
+              raw rows — a 200-million-row recording sends the same few hundred numbers
+              as a 200-row one.
+            </p>
+            <div id="health-dt" class="chart-plot"></div>
+          </div>
+
+          <!-- The channel timeline. Its precondition is the same one the
+               tab has — a detected timestamp column — so it needs no
+               empty state of its own. Everything it draws is buckets:
+               zooming asks for finer ones, and raw rows never cross the
+               bridge at any zoom. -->
+          <div class="panel" id="timeline-panel">
+            <h2>Channels over time</h2>
+            <p class="chart-note" id="timeline-note"></p>
+            <div class="catalog-controls">
+              <label class="catalog-control">
+                Channels
+                <select id="timeline-channels" multiple size="4"></select>
+              </label>
+              <button type="button" id="timeline-reset-btn" class="btn-secondary">
+                Reset zoom
+              </button>
+              <span id="timeline-status" class="chart-note"></span>
+            </div>
+            <div id="timeline-plot" class="chart-plot timeline-plot"></div>
+            <div id="timeline-selection" class="hidden">
+              <h3>Selected window</h3>
+              <p class="chart-note" id="timeline-selection-note"></p>
+              <div id="timeline-selection-stats" class="health-summary"></div>
+              <button type="button" id="timeline-search-btn" class="btn-secondary">
+                Search this window
+              </button>
+            </div>
+            <div id="timeline-marks-panel" class="hidden">
+              <h3>Findings on this recording</h3>
+              <p class="chart-note">
+                The same problems the Findings tab reports, at the moment each
+                happened. Click one to zoom to it.
+              </p>
+              <ul id="timeline-marks" class="timeline-marks"></ul>
+            </div>
+          </div>
+
+          <div class="panel">
+            <h2>Channel coverage</h2>
+            <p class="chart-note" id="health-channels-note"></p>
+            <div id="health-channels" class="chart-plot"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- One row per unit of analysis. Present for every input shape:
+           a series where a series level was mapped, and otherwise a file,
+           which is one row for a single CSV and one per file for a flat
+           folder. Every figure was computed during the chart build from
+           cached per-file statistics — opening this reads nothing. -->
+      <section id="section-catalog" class="app-section hidden">
+        <h2 class="section-heading" id="catalog-heading">Catalogue</h2>
+        <p id="catalog-empty" class="chart-note"></p>
+        <div id="catalog-content" class="hidden">
+          <div class="panel">
+            <div id="catalog-totals" class="health-summary"></div>
+            <div class="catalog-controls">
+              <input type="search" id="catalog-filter" class="catalog-filter" placeholder="Filter rows…" />
+              <label class="catalog-control">
+                Group by
+                <select id="catalog-group-by"></select>
+              </label>
+              <label class="catalog-control">
+                <input type="checkbox" id="catalog-unhealthy-only" />
+                Unhealthy only
+              </label>
+              <button type="button" id="catalog-export-btn" class="btn-secondary">Export CSV…</button>
+              <span id="catalog-export-result" class="chart-note"></span>
+            </div>
+          </div>
+
+          <div id="catalog-groups-panel" class="panel hidden">
+            <h2 id="catalog-groups-heading">Summary</h2>
+            <p class="chart-note">
+              Totals per group, and how many of its units each health status covers.
+              Tick two to compare them against each other.
+            </p>
+            <div class="catalog-table-wrapper">
+              <table id="catalog-groups-table" class="catalog-table">
+                <thead></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+            <button type="button" id="catalog-compare-groups-btn" class="btn-secondary" disabled>
+              Compare the two selected
+            </button>
+          </div>
+
+          <div class="panel">
+            <h2 id="catalog-table-heading">Catalogue</h2>
+            <p class="chart-note">
+              Click a heading to sort, a row to load it as the current scope, or tick
+              two rows to compare them. A scope change is a load, not a filter — and it
+              is incremental, so moving around an already-profiled tree reads nothing.
+            </p>
+            <div class="catalog-table-wrapper">
+              <table id="catalog-table" class="catalog-table">
+                <thead></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+            <div class="catalog-controls">
+              <button type="button" id="catalog-compare-units-btn" class="btn-secondary" disabled>
+                Compare the two selected
+              </button>
+              <span id="catalog-row-count" class="chart-note"></span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Group-vs-all comparison. Present only when there is something to
+           group by — a directory level, a hive key, or a column the user
+           nominated in the Findings tab — and never invented. -->
+      <section id="section-groups" class="app-section hidden">
+        <h2 class="section-heading" id="fleet-heading">Groups</h2>
+        <p id="fleet-empty" class="chart-note"></p>
+        <div id="fleet-content" class="hidden">
+          <div class="panel">
+            <p class="chart-note" id="fleet-method"></p>
+            <div id="fleet-totals" class="health-summary"></div>
+          </div>
+
+          <div class="panel">
+            <h2>Divergence per channel</h2>
+            <p class="chart-note" id="fleet-table-note"></p>
+            <label class="catalog-control" id="fleet-baseline-control" hidden>
+              Compare against
+              <select id="fleet-baseline">
+                <option value="typical">the typical group</option>
+                <option value="previous">the previous group</option>
+              </select>
+            </label>
+            <div class="catalog-table-wrapper">
+              <table id="fleet-table" class="catalog-table">
+                <thead></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="panel">
+            <h2>Distributions</h2>
+            <p class="chart-note" id="fleet-charts-note"></p>
+            <label class="catalog-control">
+              Channel
+              <select id="fleet-channel"></select>
+            </label>
+            <div id="fleet-small-multiples" class="fleet-multiples"></div>
+          </div>
+
+          <div class="panel" id="fleet-units-panel">
+            <h2>Recording lengths</h2>
+            <p class="chart-note" id="fleet-units-note"></p>
+            <div class="catalog-table-wrapper">
+              <table id="fleet-units-table" class="catalog-table">
+                <thead></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="panel" id="fleet-anomalies-panel">
+            <h2>Units unlike their group</h2>
+            <p class="chart-note">
+              Measured against each group's OWN median, not the fleet's — a group that
+              records in short bursts is not thereby full of anomalies.
+            </p>
+            <div class="catalog-table-wrapper">
+              <table id="fleet-anomalies-table" class="catalog-table">
+                <thead></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </section>
+
       <section id="section-findings" class="app-section hidden">
         <h2 class="section-heading">Findings</h2>
         <div class="panel">
@@ -208,6 +472,15 @@
           </p>
           <div class="findings-actions">
             <button type="button" id="deep-checks-btn" class="btn-primary">Run deep checks</button>
+            <!-- Which column group comparisons run over. A directory role
+                 or a hive key fills this in on its own; any other column
+                 is a choice, and a check that needs one simply does not
+                 run until it has it. Hidden when there is nothing to
+                 offer, which is most single files. -->
+            <label class="findings-grouping hidden" id="findings-grouping">
+              Compare groups by
+              <select id="grouping-column-select"></select>
+            </label>
           </div>
           <div id="deep-checks-progress" class="hidden compare-progress">
             <progress id="deep-checks-bar" max="100" value="0"></progress>
@@ -305,6 +578,149 @@
         </div>
 
         <div class="panel">
+          <h2>Memory ceiling</h2>
+          <p class="chart-note">
+            Heavy work — building charts, deep checks, loading a folder,
+            comparing datasets, generating a PDF — runs in a separate
+            background process. Windows is told to refuse that process any
+            memory beyond this limit, so a dataset too large to profile
+            stops with a message instead of consuming the machine. The app
+            window itself is never affected.
+          </p>
+          <label class="settings-field">
+            Limit
+            <span class="settings-inline-input">
+              <input type="number" id="settings-memory-ceiling" min="2" step="1" />
+              GB
+            </span>
+          </label>
+          <p class="settings-hint" id="settings-memory-ceiling-hint"></p>
+          <!-- Shown only when the OS cannot enforce the limit (not Windows,
+               or pywin32 missing). A ceiling the app implies it is honouring
+               but is not would be worse than showing none at all. -->
+          <p class="settings-warning hidden" id="settings-memory-ceiling-warning"></p>
+        </div>
+
+        <div class="panel">
+          <h2>Time-series health</h2>
+          <p class="chart-note">
+            Thresholds for the Health tab and its checks. They apply only when a
+            timestamp column is detected; without one, none of those checks run.
+            Changing a threshold re-judges the numbers already cached — only the
+            documented ranges below cause anything to be read again.
+          </p>
+          <label class="settings-field">
+            A gap is an interval longer than
+            <span class="settings-inline-input">
+              <input type="number" id="settings-ts-gap" min="2" step="1" />
+              × the median interval
+            </span>
+          </label>
+          <label class="settings-field">
+            A flatline is
+            <span class="settings-inline-input">
+              <input type="number" id="settings-ts-flatline" min="2" step="1" />
+              identical values in a row
+            </span>
+          </label>
+          <label class="settings-field">
+            Report a recording shorter than
+            <span class="settings-inline-input">
+              <input type="number" id="settings-ts-short" min="1" max="99" step="1" />
+              % of the median recording
+            </span>
+          </label>
+          <label class="settings-field">
+            Report jitter above
+            <span class="settings-inline-input">
+              <input type="number" id="settings-ts-jitter" min="1" max="500" step="1" />
+              % of the median interval
+            </span>
+          </label>
+          <label class="settings-field">
+            Analyse at most
+            <span class="settings-inline-input">
+              <input type="number" id="settings-ts-channels" min="0" step="1" />
+              channels per recording
+            </span>
+          </label>
+          <label class="settings-field">
+            The timeline draws at most
+            <span class="settings-inline-input">
+              <input type="number" id="settings-timeline-channels" min="1" step="1" />
+              channels at once
+            </span>
+          </label>
+          <label class="settings-field">
+            A timeline fetch reads at most
+            <span class="settings-inline-input">
+              <input type="number" id="settings-timeline-rows" min="1000" step="1000" />
+              rows
+            </span>
+          </label>
+          <p class="settings-hint" id="settings-ts-hint"></p>
+        </div>
+
+        <div class="panel">
+          <h2>Folder watching</h2>
+          <p class="chart-note">
+            Watches one folder and re-profiles as new files land, reading
+            only what is new. A file is not read until its size has held
+            still for the interval below and — for parquet — its footer
+            parses, so a file still being written is never profiled
+            half-finished.
+          </p>
+          <label class="settings-field settings-field-checkbox">
+            <input type="checkbox" id="settings-watch-enabled" />
+            Watch a folder for new files
+          </label>
+          <div class="settings-field">
+            Folder
+            <span id="settings-watch-folder" class="settings-static-value"></span>
+          </div>
+          <div class="settings-actions">
+            <button type="button" id="watch-loaded-btn" class="btn-secondary">
+              Watch the loaded folder
+            </button>
+            <button type="button" id="watch-choose-btn" class="btn-secondary">Choose folder…</button>
+          </div>
+          <label class="settings-field">
+            Wait for the file size to hold still for
+            <span class="settings-inline-input">
+              <input type="number" id="settings-watch-stability" min="1" step="1" />
+              seconds
+            </span>
+          </label>
+          <p class="settings-hint" id="settings-watch-hint"></p>
+        </div>
+
+        <div class="panel">
+          <h2>Profiling cache</h2>
+          <p class="chart-note">
+            Each file's statistics are stored locally the first time it is
+            profiled, so re-opening a folder reads only files that are new
+            or have changed since. Nothing here leaves this machine, and
+            clearing it never loses data — only the time it takes to
+            compute again.
+          </p>
+          <div class="settings-field">
+            On disk
+            <span id="settings-cache-size" class="settings-static-value"></span>
+          </div>
+          <div class="settings-field">
+            Location
+            <span id="settings-cache-path" class="settings-static-value"></span>
+          </div>
+          <div class="settings-actions">
+            <button type="button" id="clear-cache-btn" class="btn-secondary">Clear cache</button>
+            <button type="button" id="reprofile-btn" class="btn-secondary">
+              Force full re-profile
+            </button>
+          </div>
+          <p class="settings-hint" id="settings-cache-result"></p>
+        </div>
+
+        <div class="panel">
           <h2>Classification banner</h2>
           <p class="chart-note">
             Marks every screen with a label of your choosing — e.g. a
@@ -344,6 +760,12 @@
     </main>
   </div>
 
+  <!-- Re-profile notification. A corner toast that fades on its own and
+       takes no focus: new data arriving is not a reason to interrupt
+       whatever someone is in the middle of. role="status" (not "alert")
+       so a screen reader announces it politely rather than barging in. -->
+  <div id="watch-toast" class="hidden" role="status"></div>
+
   <footer id="bottom-strip" class="hidden"></footer>
 
   <div id="detail-modal" class="modal hidden">
@@ -363,5 +785,14 @@
   <!-- After app.js: findings.js uses its LOAD_POLL_MS, and app.js calls
        resetFindingsForDataset()/runFindingsScan() at runtime. -->
   <script src="findings.js"></script>
+  <!-- After app.js and compare.js: catalog.js uses app.js's drawPlot /
+       formatSeconds / healthStat / changeScope and compare.js's
+       startScopeComparison, and app.js calls renderCatalogAndFleet() at
+       runtime once the chart payload lands. -->
+  <script src="catalog.js"></script>
+  <!-- After app.js: timeline.js uses its drawPlot / themeColor /
+       formatSeconds / healthStat / showError / activateSection, and
+       app.js's renderHealthUnit() calls renderTimeline() at runtime. -->
+  <script src="timeline.js"></script>
 </body>
 </html>
