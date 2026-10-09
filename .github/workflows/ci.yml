@@ -1,0 +1,47 @@
+name: CI
+
+# Windows only, and not an oversight: ml_data_view/api.py imports pywebview
+# at module level and tests/test_api.py imports api, so the suite needs a
+# platform where that import resolves without a GTK/QT runtime. The app
+# itself targets Windows too -- see docs/architecture.md.
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: pytest (Python ${{ matrix.python-version }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The floor declared in pyproject.toml, and a current release.
+        python-version: ["3.11", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: Run tests
+        # The suite takes roughly four minutes; most of it is building real
+        # parquet fixtures and profiling them.
+        run: python -m pytest -q
+        timeout-minutes: 20
