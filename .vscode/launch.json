@@ -1,0 +1,25 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "ML Dataset Profiler",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "ml_data_view.main",
+      "console": "integratedTerminal",
+      // Background jobs run in worker subprocesses (ml_data_view/jobs.py);
+      // without this, breakpoints inside them never bind.
+      "subProcess": true,
+      "justMyCode": false
+    },
+    {
+      "name": "Pytest: current file",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "pytest",
+      "args": ["-v", "${file}"],
+      "console": "integratedTerminal",
+      "justMyCode": false
+    }
+  ]
+}
